@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Arena Hero · 荒原科考指挥台</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="expedition-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <span class="brand-plate" aria-hidden="true"><i></i></span>
+          <div><strong>ARENA HERO</strong><span>荒原科考队 · 自动远征</span></div>
+        </div>
+        <div class="mission-strip" aria-label="当前策略">
+          <span>策略</span><strong>采集优先</strong><i></i><b>扩充人口</b><i></i><b>避免交战</b>
+        </div>
+        <div class="connection live-lockup" id="connection" data-status="connecting">
+          <span class="status-dot" aria-hidden="true"></span>
+          <div><strong id="connectionText">等待策略连接</strong><time id="lastUpdate">--:--:--</time></div>
+          <span class="tick-chip">TICK <b id="tick">--</b></span>
+        </div>
+      </header>
+
+      <section class="map-stage map-panel" aria-labelledby="mapTitle">
+        <div class="canvas-wrap" id="canvasWrap">
+          <canvas id="mapCanvas" aria-label="Arena Hero 已探索地图，Y 轴向下"></canvas>
+          <div class="map-tooltip" id="mapTooltip" hidden></div>
+        </div>
+
+        <div class="map-title-block">
+          <span id="sectorCoordinate">SECTOR -- : --</span>
+          <h1 id="mapTitle">灰烬盆地</h1>
+          <p id="mapSummary">等待首个 Turn · 已探索地图</p>
+        </div>
+
+        <div class="north-mark" aria-label="地图方向，北方在上">
+          <svg viewBox="0 0 24 34" aria-hidden="true"><path d="M12 1 22 28l-10-6-10 6L12 1Z"/></svg><b>N</b>
+        </div>
+
+        <div class="map-tools" aria-label="地图工具">
+          <button id="zoomOut" class="icon-button" type="button" aria-label="缩小地图" title="缩小地图">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+          </button>
+          <button id="resetView" class="icon-button" type="button" aria-label="重置地图视野" title="重置地图视野">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8M4 4v4h4"/></svg>
+          </button>
+          <button id="zoomIn" class="icon-button" type="button" aria-label="放大地图" title="放大地图">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+
+        <div class="map-hud map-readout">
+          <span><b>X</b> → EAST</span><span><b>Y</b> ↓ SOUTH</span><strong id="cursorCoordinate">--, --</strong>
+        </div>
+
+        <div class="legend terrain-legend" aria-label="地图图例">
+          <span><i class="swatch visible"></i>当前视野</span>
+          <span><i class="swatch explored"></i>已探索</span>
+          <span><i class="swatch obstacle"></i>障碍</span>
+          <span><i class="swatch resource"></i>资源晶体</span>
+          <span><i class="swatch resource-memory"></i>资源记忆</span>
+          <span><i class="swatch enemy"></i>敌方</span>
+          <span><i class="swatch target"></i>任务路线</span>
+        </div>
+
+        <div class="selection-tag" id="selectionTag" aria-live="polite">
+          <span>地图中心</span><strong id="selectedName">等待数据</strong><b id="selectedPosition">--, --</b>
+        </div>
+      </section>
+
+      <aside class="field-desk side-panel" aria-label="远征状态栏">
+        <section class="core-showcase core-section">
+          <div class="panel-kicker"><span>移动基地</span><b>CORE C0</b><i id="playerStatus">--</i></div>
+          <div class="model-bay">
+            <canvas class="model-canvas" data-model="core" aria-label="Core 移动指挥堡垒模型"></canvas>
+            <div class="model-shadow" aria-hidden="true"></div>
+            <span class="spec-label spec-a" id="coreState">--</span>
+            <span class="spec-label spec-b">POSITION <b id="corePosition">--</b></span>
+          </div>
+          <div class="vitals">
+            <div><span>结构</span><strong id="coreHp">--</strong><i><b id="coreHpBar" style="--value:0%"></b></i></div>
+            <div><span>护盾</span><strong id="coreShield">--</strong><i><b id="coreShieldBar" style="--value:0%"></b></i></div>
+            <div><span>储量</span><strong id="resources">0 / 0</strong><i><b id="resourceBar" style="--value:0%"></b></i></div>
+          </div>
+          <div class="fleet-summary">
+            <span><b id="workerCount">0</b> 工人</span><span><b id="vanguardCount">0</b> 先锋</span><span><b id="rangerCount">0</b> 游侠</span><span><b id="enemyCount">0</b> 威胁</span>
+          </div>
+        </section>
+
+        <section class="unit-roster workers-section">
+          <div class="section-heading">
+            <div><span>FIELD TEAM</span><h2>行动编队</h2></div>
+            <strong><b id="population">0</b> UNIT</strong>
+          </div>
+          <div class="unit-tabs" id="workerRows" role="list" aria-label="单位列表">
+            <p class="empty-state">等待单位数据</p>
+          </div>
+          <div class="roster-meta"><span id="cargoTotal">载荷 0</span><span>已提交 <b id="accepted">0</b></span><span>异常 <b id="failed">0</b></span></div>
+        </section>
+
+        <section class="operator-stats operator-stats-section" aria-labelledby="statsTitle">
+          <div class="section-heading compact stats-heading">
+            <div><span>OPERATOR RECORD</span><h2 id="statsTitle">操作员统计</h2></div>
+            <strong id="statsSource" title="等待统计数据">等待</strong>
+          </div>
+          <div class="stats-grid">
+            <article><strong data-stat="resources_harvested">0</strong><span>采集</span></article>
+            <article><strong data-stat="resources_deposited">0</strong><span>交付</span></article>
+            <article><strong data-stat="units_spawned">0</strong><span>生产</span></article>
+            <article><strong data-stat="core_survival_ticks">0</strong><span>存活 Tick</span></article>
+            <article><strong data-stat="damage_dealt">0</strong><span>造成伤害</span></article>
+            <article><strong data-stat="respawn_count">0</strong><span>重生</span></article>
+            <article><strong data-stat="damage_received">0</strong><span>承受伤害</span></article>
+            <article><strong data-stat="unit_destruction_participations">0</strong><span>单位摧毁</span></article>
+            <article><strong data-stat="core_destruction_participations">0</strong><span>Core 摧毁</span></article>
+            <article><strong data-stat="beacon_pickups">0</strong><span>信标拾取</span></article>
+            <article><strong data-stat="beacon_ticks_held">0</strong><span>信标持有</span></article>
+            <article><strong data-stat="beacon_bonus_resources_harvested">0</strong><span>信标加成</span></article>
+            <article><strong data-stat="units_lost">0</strong><span>单位损失</span></article>
+            <article><strong data-stat="unit_hp_recovered">0</strong><span>单位恢复</span></article>
+            <article><strong data-stat="core_hp_recovered">0</strong><span>Core 恢复</span></article>
+          </div>
+        </section>
+
+        <section class="resource-intel resources-section">
+          <div class="section-heading compact">
+            <div><span>SALVAGE INTEL</span><h2>资源情报</h2></div>
+            <strong id="visibleResourceCount">可见 0 · 记忆 0</strong>
+          </div>
+          <div class="resource-list" id="resourceList"><p class="empty-state">暂无已知资源</p></div>
+        </section>
+      </aside>
+
+      <footer class="event-tape events-section" aria-label="实时事件">
+        <span class="event-index">运行 <b id="uptime">00:00</b></span>
+        <ol class="event-window event-list" id="eventList"><li class="empty-event">暂无事件</li></ol>
+        <span class="safety"><i></i><b id="explored">0</b> 格已探索 · <b id="resourceNodes">0</b> 资源点</span>
+        <p class="runtime-error" id="runtimeError" hidden></p>
+      </footer>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

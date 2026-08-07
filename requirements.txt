@@ -1,0 +1,2 @@
+arena-hero>=0.2.9,<0.3
+python-socks>=2.5,<3

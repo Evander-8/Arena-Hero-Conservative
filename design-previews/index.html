@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Arena Hero · 荒原科考指挥台</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="expedition-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <span class="brand-plate" aria-hidden="true"><i></i></span>
+          <div>
+            <strong>ARENA HERO</strong>
+            <span>荒原科考队 · 远征 07</span>
+          </div>
+        </div>
+        <div class="mission-strip" aria-label="本轮任务">
+          <span>任务</span>
+          <strong>采集优先</strong>
+          <i></i>
+          <b>扩充人口</b>
+          <i></i>
+          <b>避免交战</b>
+        </div>
+        <div class="live-lockup">
+          <span class="live-lamp"></span>
+          <div><strong>LIVE</strong><time id="clock">16:24:18</time></div>
+          <button class="icon-button" type="button" aria-label="暂停实时画面" title="暂停实时画面">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <section class="map-stage" aria-labelledby="mapTitle">
+        <canvas id="terrainMap" aria-label="Arena Hero 已探索地图，Y 轴向下"></canvas>
+
+        <div class="map-title-block">
+          <span>SECTOR 153 : 273</span>
+          <h1 id="mapTitle">灰烬盆地</h1>
+          <p>已探索 10,397 格 · 当前视野 61 格</p>
+        </div>
+
+        <div class="north-mark" aria-label="地图方向，北方在上">
+          <svg viewBox="0 0 24 34" aria-hidden="true"><path d="M12 1 22 28l-10-6-10 6L12 1Z"/></svg>
+          <b>N</b>
+        </div>
+
+        <div class="map-actions" aria-label="地图工具">
+          <button id="zoomOut" class="icon-button" type="button" aria-label="缩小地图" title="缩小地图">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+          </button>
+          <button id="resetView" class="icon-button" type="button" aria-label="重置地图视野" title="重置地图视野">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8M4 4v4h4"/></svg>
+          </button>
+          <button id="zoomIn" class="icon-button" type="button" aria-label="放大地图" title="放大地图">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+
+        <div class="map-readout">
+          <span><b>X</b> → EAST</span>
+          <span><b>Y</b> ↓ SOUTH</span>
+          <strong id="cursorCoordinate">153, 273</strong>
+        </div>
+
+        <div class="terrain-legend" aria-label="地图图例">
+          <span><i class="swatch visible"></i>当前视野</span>
+          <span><i class="swatch explored"></i>已探索</span>
+          <span><i class="swatch obstacle"></i>障碍</span>
+          <span><i class="swatch crystal"></i>资源晶体</span>
+          <span><i class="swatch memory"></i>资源记忆</span>
+        </div>
+
+        <div id="selectionTag" class="selection-tag" aria-live="polite">
+          <span>已选择</span>
+          <strong>CORE · C0</strong>
+          <b>153, 273</b>
+        </div>
+      </section>
+
+      <aside class="field-desk" aria-label="远征状态栏">
+        <section class="core-showcase">
+          <div class="panel-kicker"><span>移动基地</span><b>CORE C0</b><i>ACTIVE</i></div>
+          <div class="model-bay">
+            <canvas class="model-canvas" data-model="core" aria-label="Core 移动指挥堡垒模型"></canvas>
+            <div class="model-shadow" aria-hidden="true"></div>
+            <span class="spec-label spec-a">HEX REACTOR</span>
+            <span class="spec-label spec-b">STORAGE 28/30</span>
+          </div>
+          <div class="vitals">
+            <div><span>结构</span><strong>5 / 5</strong><i><b style="--value:100%"></b></i></div>
+            <div><span>护盾</span><strong>5 / 5</strong><i><b style="--value:100%"></b></i></div>
+            <div><span>储量</span><strong>28 / 30</strong><i><b style="--value:93%"></b></i></div>
+          </div>
+        </section>
+
+        <section class="unit-roster">
+          <div class="section-heading">
+            <div><span>FIELD TEAM</span><h2>行动编队</h2></div>
+            <strong>7 / 10</strong>
+          </div>
+          <div class="unit-tabs" role="list" aria-label="单位列表">
+            <button class="unit-card active" type="button" data-unit="worker" data-id="W1" data-coordinate="148, 269" aria-pressed="true">
+              <canvas data-model="worker" aria-hidden="true"></canvas>
+              <span><b>W1 · 工人</b><small>前往晶体矿脉</small></span>
+              <i class="status moving">移动</i>
+            </button>
+            <button class="unit-card" type="button" data-unit="worker" data-id="W2" data-coordinate="159, 279" aria-pressed="false">
+              <canvas data-model="worker" aria-hidden="true"></canvas>
+              <span><b>W2 · 工人</b><small>向 Core 返航</small></span>
+              <i class="status carrying">载货</i>
+            </button>
+            <button class="unit-card" type="button" data-unit="vanguard" data-id="V1" data-coordinate="154, 273" aria-pressed="false">
+              <canvas data-model="vanguard" aria-hidden="true"></canvas>
+              <span><b>V1 · 先锋</b><small>核心近卫警戒</small></span>
+              <i class="status guard">警戒</i>
+            </button>
+            <button class="unit-card" type="button" data-unit="ranger" data-id="R1" data-coordinate="156, 274" aria-pressed="false">
+              <canvas data-model="ranger" aria-hidden="true"></canvas>
+              <span><b>R1 · 游侠</b><small>扫描东南边界</small></span>
+              <i class="status scout">探索</i>
+            </button>
+          </div>
+        </section>
+
+        <section class="resource-intel">
+          <div class="section-heading compact">
+            <div><span>SALVAGE INTEL</span><h2>资源情报</h2></div>
+            <strong>5 处</strong>
+          </div>
+          <div class="resource-list">
+            <button type="button" data-resource="148,268"><i></i><span><b>148, 268</b><small>已分配 W1</small></span><strong>可见</strong></button>
+            <button type="button" data-resource="161,279"><i></i><span><b>161, 279</b><small>待分配工人</small></span><strong>可见</strong></button>
+            <button type="button" data-resource="143,281"><i></i><span><b>143, 281</b><small>待分配工人</small></span><strong>可见</strong></button>
+            <button class="remembered" type="button" data-resource="170,264"><i></i><span><b>170, 264</b><small>返航途中发现</small></span><strong>记忆</strong></button>
+          </div>
+        </section>
+
+        <section class="operator-stats">
+          <div class="section-heading compact">
+            <div><span>OPERATOR RECORD</span><h2>操作员统计</h2></div>
+            <strong>生涯</strong>
+          </div>
+          <div class="stats-grid">
+            <div><span>采集</span><strong>685</strong></div>
+            <div><span>交付</span><strong>822</strong></div>
+            <div><span>生产</span><strong>1,370</strong></div>
+            <div><span>存活 Tick</span><strong>1,918</strong></div>
+            <div><span>伤害</span><strong>137</strong></div>
+            <div><span>重生</span><strong>12</strong></div>
+          </div>
+        </section>
+      </aside>
+
+      <footer class="event-tape" aria-label="实时事件">
+        <span class="event-index">TICK <b id="tickValue">4,281</b></span>
+        <div class="event-window">
+          <p><time>16:24:16</time><i class="move"></i><b>W2</b> 抵达 154, 272，继续向 Core 返航</p>
+          <p><time>16:24:14</time><i class="found"></i><b>新资源</b> 已记录于 170, 264，等待工人分配</p>
+        </div>
+        <span class="safety"><i></i>威胁 0 · 航线安全</span>
+      </footer>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
