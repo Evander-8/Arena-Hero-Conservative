@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -193,6 +194,18 @@ class ResourceTacticTests(unittest.TestCase):
         self.assertIn((0, 0), restored.explored_cells)
         self.assertIn((20, 0), restored.explored_cells)
         self.assertIn((21, 1), restored.known_obstacles)
+
+    def test_state_directory_uses_configured_server_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = pathlib.Path(directory) / "arena-state"
+            with patch.dict(
+                tactic.os.environ,
+                {"ARENA_HERO_STATE_DIR": str(state_path)},
+            ):
+                resolved = tactic._state_directory()
+
+            self.assertEqual(resolved, state_path)
+            self.assertTrue(state_path.is_dir())
 
     def test_worker_deposits_cargo_at_core(self):
         worker = FakeUnit((0, 0), cargo=2)

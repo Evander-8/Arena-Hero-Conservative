@@ -1,0 +1,35 @@
+[Unit]
+Description=Arena Hero Conservative tactic
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=arena-hero
+Group=arena-hero
+WorkingDirectory=/opt/arena-hero-conservative
+EnvironmentFile=/etc/arena-hero-conservative/arena-hero.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/arena-hero-conservative/.venv/bin/python /opt/arena-hero-conservative/tactic.py
+Restart=on-failure
+RestartSec=10s
+KillSignal=SIGINT
+TimeoutStopSec=20s
+
+StateDirectory=arena-hero-conservative
+StateDirectoryMode=0750
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

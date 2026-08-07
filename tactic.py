@@ -1114,6 +1114,17 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
     )
 
 
+def _state_directory() -> Path:
+    configured = os.environ.get("ARENA_HERO_STATE_DIR")
+    directory = (
+        Path(configured).expanduser()
+        if configured
+        else Path(__file__).resolve().parent
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
 def play(api_key: str) -> None:
     """Run the tactic continuously with the official synchronous SDK."""
 
@@ -1123,10 +1134,12 @@ def play(api_key: str) -> None:
         raise RuntimeError("Install dependencies first: python -m pip install -r requirements.txt")
 
     runtime = DashboardRuntime()
-    stats_path = Path(__file__).with_name(".arena-hero-dashboard-stats.json")
-    map_path = Path(__file__).with_name(".arena-hero-dashboard-map.json")
+    state_directory = _state_directory()
+    stats_path = state_directory / ".arena-hero-dashboard-stats.json"
+    map_path = state_directory / ".arena-hero-dashboard-map.json"
     MEMORY = TacticMemory.load(map_path)
     operator_stats = fetch_lifetime_stats(api_key) or OperatorStats.load(stats_path)
+    print(f"state_directory={state_directory}")
     print(f"statistics={operator_stats.source}")
     print(f"explored_cells={len(MEMORY.explored_cells)}")
     dashboard_server = None

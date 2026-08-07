@@ -120,6 +120,16 @@ ARENA_HERO_DASHBOARD_PORT=9000 python tactic.py
 ARENA_HERO_DASHBOARD=0 python tactic.py
 ```
 
+## 服务器部署
+
+仓库提供了适用于 Linux `systemd` 的部署文件，包含独立运行用户、受保护的 API Key
+环境文件、持久化状态目录、自动重启以及可选的 Nginx 密码保护配置。完整步骤见
+[`deploy/README.md`](deploy/README.md)。
+
+服务器部署建议保持 Dashboard 监听 `127.0.0.1`，通过 SSH 隧道访问，不要直接将
+`8765` 端口暴露到公网。可通过 `ARENA_HERO_STATE_DIR` 将地图和统计保存到独立目录；
+systemd 模板默认使用 `/var/lib/arena-hero-conservative`。
+
 ## 检查
 
 离线策略测试：
