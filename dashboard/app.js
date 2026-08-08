@@ -14,6 +14,10 @@
   let runtimeStatus = "connecting";
   let runtimeRefreshInFlight = false;
   const hitTargets = [];
+  const accessGate = $("accessGate");
+  const accessForm = $("accessForm");
+  const accessInput = $("apiKey");
+  const accessMessage = $("accessMessage");
 
   const colors = {
     ink: "#182522",
@@ -78,9 +82,28 @@
 
   function statusText(status) {
     return {
+      "awaiting-key": "等待页面输入 Key",
       connecting: "等待策略连接", connected: "实时连接", error: "策略异常",
       stopped: "策略已停止", reconnecting: "正在重连",
     }[status] || status;
+  }
+
+  function updateAccessGate(runtime) {
+    const status = runtime.status || "awaiting-key";
+    if (status === "awaiting-key" || status === "error" || status === "stopped") {
+      accessGate.hidden = false;
+      if (status === "error") {
+        accessMessage.dataset.state = "error";
+        accessMessage.textContent = runtime.lastError || "策略启动失败，请重新提交 Key。";
+      } else if (status === "stopped") {
+        accessMessage.dataset.state = "error";
+        accessMessage.textContent = "策略已停止，请重新提交 Key。";
+      } else if (!accessMessage.textContent) {
+        accessMessage.textContent = "";
+      }
+      return;
+    }
+    accessGate.hidden = true;
   }
 
   function applyRuntime(runtime, serverTime) {
@@ -91,6 +114,7 @@
     setText("uptime", formatDuration(Number(runtime.uptimeSeconds || 0)));
     setText("accepted", runtime.acceptedSubmissions || 0);
     setText("failed", runtime.failedSubmissions || 0);
+    updateAccessGate(runtime);
   }
 
   function unitTypeName(type) {
@@ -577,6 +601,40 @@
   $("zoomOut").addEventListener("click",()=>{view.cell=Math.max(3,view.cell/1.2);drawMap();});
   $("resetView").addEventListener("click",fitMap);
   window.addEventListener("resize",resizeCanvas);
+
+  accessForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const apiKey = accessInput.value.trim();
+    if (!apiKey) {
+      accessMessage.dataset.state = "error";
+      accessMessage.textContent = "请输入 API Key。";
+      accessInput.focus();
+      return;
+    }
+    const submitButton = accessForm.querySelector("button[type=submit]");
+    submitButton.disabled = true;
+    accessMessage.dataset.state = "ok";
+    accessMessage.textContent = "正在连接 Arena Hero...";
+    try {
+      const response = await fetch("/api/key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.accepted) {
+        throw new Error(payload.message || "Key 提交失败。");
+      }
+      accessInput.value = "";
+      accessMessage.textContent = "已提交，策略正在启动。关闭此页面不会停止运行。";
+      accessGate.hidden = true;
+    } catch (error) {
+      accessMessage.dataset.state = "error";
+      accessMessage.textContent = error.message || "Key 提交失败，请重试。";
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
 
   async function loadInitialState() {
     try {

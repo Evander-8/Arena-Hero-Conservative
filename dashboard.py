@@ -13,7 +13,7 @@ import re
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -417,8 +417,12 @@ class DashboardRuntime:
     started_at: float = field(default_factory=time.monotonic)
     accepted_submissions: int = 0
     failed_submissions: int = 0
-    status: str = "connecting"
+    status: str = "awaiting-key"
     last_error: str | None = None
+    _key_submitter: Callable[[str], tuple[bool, str | None]] | None = field(
+        default=None,
+        repr=False,
+    )
     _sequence: int = 0
     _snapshot: dict[str, Any] = field(default_factory=dict)
     _condition: threading.Condition = field(default_factory=threading.Condition)
@@ -438,13 +442,40 @@ class DashboardRuntime:
                 self.failed_submissions += 1
             self._bump_locked()
 
-    def record_error(self, error: BaseException) -> None:
+    def record_error(self, error: BaseException, secret: str | None = None) -> None:
         with self._condition:
             self.status = "error"
             self.failed_submissions += 1
-            message = re.sub(r"ah_live_[A-Za-z0-9_-]+", "[redacted]", str(error))
+            message = str(error)
+            if secret:
+                message = message.replace(secret, "[redacted]")
+            message = re.sub(r"ah_live_[A-Za-z0-9_-]+", "[redacted]", message)
             self.last_error = f"{error.__class__.__name__}: {message[:240]}"
             self._bump_locked()
+
+    def begin_connecting(self) -> None:
+        with self._condition:
+            self.status = "connecting"
+            self.last_error = None
+            self._bump_locked()
+
+    def set_key_submitter(
+        self,
+        submitter: Callable[[str], tuple[bool, str | None]] | None,
+    ) -> None:
+        with self._condition:
+            self._key_submitter = submitter
+
+    def submit_key(self, api_key: str) -> tuple[bool, str | None]:
+        with self._condition:
+            submitter = self._key_submitter
+        if submitter is None:
+            return False, "策略启动器尚未准备好。"
+        try:
+            return submitter(api_key)
+        except Exception as exc:  # Keep HTTP clients from seeing internal details.
+            self.record_error(exc)
+            return False, "策略启动失败，请检查 Dashboard 日志。"
 
     def stop(self) -> None:
         with self._condition:
@@ -537,7 +568,53 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
-    def _send_json(self, payload: dict[str, Any]) -> None:
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        path = self.path.split("?", 1)[0]
+        if path != "/api/key":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+        if content_length <= 0 or content_length > 4096:
+            self._send_json(
+                {"accepted": False, "message": "请求内容无效。"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            payload = json.loads(self.rfile.read(content_length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json(
+                {"accepted": False, "message": "请求内容无效。"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        api_key = payload.get("apiKey") if isinstance(payload, dict) else None
+        if not isinstance(api_key, str):
+            self._send_json(
+                {"accepted": False, "message": "请输入 API Key。"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        accepted, message = self.server.runtime.submit_key(api_key)
+        response = {"accepted": accepted}
+        if message:
+            response["message"] = message
+        self._send_json(
+            response,
+            status=HTTPStatus.ACCEPTED if accepted else HTTPStatus.BAD_REQUEST,
+        )
+
+    def _send_json(
+        self,
+        payload: dict[str, Any],
+        *,
+        status: HTTPStatus = HTTPStatus.OK,
+    ) -> None:
         # SDK models may retain UUID values in event payloads. Convert those
         # identifiers at the HTTP boundary so one malformed event cannot drop
         # the entire /api/state response.
@@ -546,7 +623,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             separators=(",", ":"),
             default=str,
         ).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")

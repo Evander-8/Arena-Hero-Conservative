@@ -4,7 +4,7 @@ import tempfile
 import types
 import unittest
 from uuid import UUID
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from dashboard import DashboardRuntime, OperatorStats, build_snapshot, start_dashboard
 import tactic
@@ -52,6 +52,13 @@ class FakeTurn:
 
 
 class DashboardTests(unittest.TestCase):
+    def test_runtime_waits_for_page_key_by_default(self):
+        runtime = DashboardRuntime()
+
+        _, payload = runtime.current()
+
+        self.assertEqual(payload["runtime"]["status"], "awaiting-key")
+
     def test_explored_cells_accumulate_between_turns(self):
         memory = tactic.TacticMemory()
         memory.observe(FakeTurn(worker_position=(0, 0)))
@@ -117,10 +124,61 @@ class DashboardTests(unittest.TestCase):
         self.assertIsInstance(runtime_payload["serverTime"], int)
         self.assertIn("已探索地图", page)
         self.assertIn("operator-stats-section", page)
+        self.assertIn('id="accessForm"', page)
+        self.assertIn('id="apiKey"', page)
         self.assertEqual(page.count("data-stat="), 15)
         self.assertNotIn("<dialog", page)
         self.assertNotIn("statsButton", page)
         self.assertLess(page.index("operator-stats-section"), page.index("resources-section"))
+
+    def test_dashboard_accepts_key_without_exposing_it_in_state(self):
+        runtime = DashboardRuntime()
+        submitted = []
+        runtime.set_key_submitter(
+            lambda api_key: (submitted.append(api_key) is None, None)
+        )
+        server, thread = start_dashboard(runtime, port=0)
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        secret = "ah_live_dashboard_test_key"
+        try:
+            request = Request(
+                f"{base_url}/api/key",
+                data=json.dumps({"apiKey": secret}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request, timeout=2) as response:
+                accepted = json.load(response)
+            with urlopen(f"{base_url}/api/state", timeout=2) as response:
+                state = json.load(response)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(accepted, {"accepted": True})
+        self.assertEqual(submitted, [secret])
+        self.assertNotIn(secret, json.dumps(state))
+
+    def test_dashboard_rejects_malformed_key_request(self):
+        runtime = DashboardRuntime()
+        server, thread = start_dashboard(runtime, port=0)
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = Request(
+                f"{base_url}/api/key",
+                data=b"{not-json}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(Exception) as context:
+                urlopen(request, timeout=2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertIn("HTTP Error 400", str(context.exception))
 
     def test_dashboard_serializes_uuid_values_in_state_and_runtime(self):
         runtime = DashboardRuntime()

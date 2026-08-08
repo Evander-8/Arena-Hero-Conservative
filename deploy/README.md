@@ -1,8 +1,8 @@
 # Linux Server Deployment
 
 This is the supported Debian/Ubuntu cloud deployment path. It keeps exactly one
-tactic process running under `systemd`, stores the API key outside the Git
-checkout, persists the exploration map and operator statistics, and keeps the
+tactic process running under `systemd`, accepts the API key through the local
+Dashboard after startup, persists the exploration map and operator statistics, and keeps the
 Dashboard bound to loopback. The current tactic grows the living fleet until
 population 30, which gives the Core `max(10, 30 * 5) = 150` resource capacity.
 One Vanguard and one Ranger stay near the Core; the remaining combat units
@@ -15,7 +15,7 @@ Beacon when safe.
 |---|---|
 | `/opt/arena-hero-conservative` | Git checkout and Python virtual environment |
 | `/var/lib/arena-hero-conservative` | Persistent map and operator statistics |
-| `/etc/arena-hero-conservative/arena-hero.env` | API key and runtime settings |
+| `/etc/arena-hero-conservative/arena-hero.env` | Dashboard and runtime settings |
 | `/etc/systemd/system/arena-hero.service` | Long-running service definition |
 
 Do not run a second tactic process with the same Arena Hero account. All Agent
@@ -71,7 +71,7 @@ sudo -u arena-hero \
   -s /opt/arena-hero-conservative/tests
 ```
 
-## 3. Configure the API key
+## 3. Configure runtime settings
 
 ```bash
 sudo install -d -m 0750 \
@@ -85,8 +85,9 @@ sudo install -m 0640 \
 sudoedit /etc/arena-hero-conservative/arena-hero.env
 ```
 
-Replace only `replace-with-your-api-key`. Do not put the real key in the Git
-repository or in a shell command that will remain in history.
+Keep `ARENA_HERO_DASHBOARD=1`. Do not put the API Key in this file or in the Git
+repository. Submit it through the Dashboard after the service starts; it remains
+in the running Python process memory only.
 
 ## 4. Install and start the service
 
@@ -106,8 +107,9 @@ Follow live logs with:
 sudo journalctl -u arena-hero.service -f
 ```
 
-The logs should show accepted Tick submissions and a dashboard URL on
-`127.0.0.1` without printing the API key.
+The logs should show a dashboard URL on `127.0.0.1` and a process waiting for a
+page Key. Open the Dashboard, enter the API Key, and submit it once. Accepted
+Tick submissions should then appear in the logs.
 
 Verify the local API from the server:
 
@@ -115,8 +117,11 @@ Verify the local API from the server:
 curl --fail --silent http://127.0.0.1:8765/api/state | python3 -m json.tool | head -80
 ```
 
-Look for `runtime.status` equal to `connected`, a growing `sequence`, and
-`acceptedSubmissions` greater than zero. A second tactic process for the same
+Before submitting the Key, `runtime.status` is `awaiting-key`. After submission,
+look for `runtime.status` equal to `connected`, a growing `sequence`, and
+`acceptedSubmissions` greater than zero. Closing or refreshing the browser does
+not stop the strategy while the service process remains alive, so the Key is not
+requested again. A second tactic process for the same
 Arena Hero account can overwrite the Agent plan, so stop duplicate processes
 before interpreting stale Dashboard data.
 
@@ -254,10 +259,10 @@ If dependency installation also cannot reach a package index, do not delete the
 old `.venv`; copy the already-installed `.venv` back and confirm that the new
 `requirements.txt` is compatible before starting.
 
-The service reads `ARENA_HERO_API_KEY` from the systemd `EnvironmentFile`.
-`python-dotenv` is only a convenience for local `.env` runs; the tactic does not
-require it when started by systemd. If an older server environment is missing
-that optional package, the service can still start normally.
+The service reads Dashboard and state settings from the systemd `EnvironmentFile`;
+it does not require `ARENA_HERO_API_KEY` at startup. If an older environment file
+still contains an `ARENA_HERO_API_KEY` line, it is ignored by this page-gated
+startup path and can be removed.
 
 Reinstall the service template only if it changed, then start the new version:
 

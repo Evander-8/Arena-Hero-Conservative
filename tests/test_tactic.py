@@ -809,6 +809,12 @@ class ResourceTacticTests(unittest.TestCase):
         self.assertIn("position 6=U+200B", output)
         self.assertNotIn("valid\u200bkey", output)
 
+    def test_main_starts_page_gate_without_terminal_key_prompt(self):
+        with patch.object(tactic, "play") as play_mock:
+            tactic.main()
+
+        play_mock.assert_called_once_with()
+
     def test_local_environment_loads_project_env_without_override(self):
         with patch.object(tactic, "load_dotenv") as load_dotenv_mock:
             tactic._load_local_environment()

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import heapq
 import json
 import os
+import threading
 from getpass import getpass
 from pathlib import Path
 from typing import Any, Iterable
@@ -1666,15 +1667,10 @@ def _start_configured_dashboard(runtime: DashboardRuntime) -> Any:
     return server
 
 
-def play(api_key: str) -> None:
-    """Run the tactic continuously with the official synchronous SDK."""
+def _run_game(api_key: str, runtime: DashboardRuntime) -> None:
+    """Run one authenticated game session in the background."""
 
     global MEMORY
-
-    if ArenaHeroClient is None:
-        raise RuntimeError("Install dependencies first: python -m pip install -r requirements.txt")
-
-    runtime = DashboardRuntime()
     state_directory = _state_directory()
     stats_path = state_directory / ".arena-hero-dashboard-stats.json"
     map_path = state_directory / ".arena-hero-dashboard-map.json"
@@ -1683,16 +1679,6 @@ def play(api_key: str) -> None:
     print(f"state_directory={state_directory}")
     print(f"statistics={operator_stats.source}")
     print(f"explored_cells={len(MEMORY.explored_cells)}")
-    dashboard_server = None
-    dashboard_enabled = os.environ.get("ARENA_HERO_DASHBOARD", "1").lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-    if dashboard_enabled:
-        dashboard_server = _start_configured_dashboard(runtime)
-
     try:
         with ArenaHeroClient(api_key=api_key) as game:
             for turn in game.turns():
@@ -1720,13 +1706,65 @@ def play(api_key: str) -> None:
     except KeyboardInterrupt:
         print("stopped")
     except Exception as exc:
-        runtime.record_error(exc)
-        raise
+        runtime.record_error(exc, api_key)
+        print(f"strategy_error={runtime.current()[1]['runtime']['lastError']}")
+
+
+def play() -> None:
+    """Start the Dashboard and wait for a Key submitted from its page."""
+
+    if ArenaHeroClient is None:
+        raise RuntimeError("Install dependencies first: python -m pip install -r requirements.txt")
+
+    runtime = DashboardRuntime()
+    dashboard_enabled = os.environ.get("ARENA_HERO_DASHBOARD", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not dashboard_enabled:
+        raise SystemExit(
+            "Dashboard must be enabled because the Arena Hero API Key is entered on its page."
+        )
+
+    worker_lock = threading.Lock()
+    game_thread: threading.Thread | None = None
+
+    def submit_key(raw_key: str) -> tuple[bool, str | None]:
+        nonlocal game_thread
+        api_key = raw_key.strip()
+        validation_error = _api_key_validation_error(api_key)
+        if validation_error:
+            return False, validation_error
+        with worker_lock:
+            if game_thread is not None and game_thread.is_alive():
+                return False, "策略已经在运行；关闭或刷新网页不会停止它。"
+            runtime.begin_connecting()
+            game_thread = threading.Thread(
+                target=_run_game,
+                args=(api_key, runtime),
+                name="arena-hero-tactic",
+                daemon=True,
+            )
+            game_thread.start()
+        return True, None
+
+    runtime.set_key_submitter(submit_key)
+    dashboard_server = _start_configured_dashboard(runtime)
+    stop_event = threading.Event()
+    try:
+        print("Enter the Arena Hero API Key at the Dashboard page to start.")
+        while not stop_event.wait(0.5):
+            pass
+    except KeyboardInterrupt:
+        print("stopped")
     finally:
+        stop_event.set()
+        runtime.set_key_submitter(None)
         runtime.stop()
-        if dashboard_server is not None:
-            dashboard_server.shutdown()
-            dashboard_server.server_close()
+        dashboard_server.shutdown()
+        dashboard_server.server_close()
 
 
 def _api_key_validation_error(api_key: str) -> str | None:
@@ -1780,8 +1818,7 @@ def _load_local_environment() -> None:
 
 
 def main() -> None:
-    _load_local_environment()
-    play(_load_api_key())
+    play()
 
 
 if __name__ == "__main__":

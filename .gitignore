@@ -6,6 +6,7 @@ __pycache__/
 .env
 .arena-hero-tactic*.log
 .arena-hero-local-*.log
+.arena-hero-page-gate*.log
 .arena-hero-dashboard-stats.json*
 .arena-hero-dashboard-map.json*
 arena-hero-release-*.tar.gz

@@ -7,6 +7,25 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
+    <section class="access-gate" id="accessGate" aria-labelledby="accessTitle">
+      <div class="access-panel">
+        <div class="access-mark" aria-hidden="true"><span></span></div>
+        <span class="panel-kicker">SECURE START</span>
+        <h1 id="accessTitle">连接 Arena Hero</h1>
+        <p>输入 API Key 后开始运行策略。关闭或刷新此页面不会停止已启动的策略。</p>
+        <form id="accessForm" autocomplete="off">
+          <label for="apiKey">Arena Hero API Key</label>
+          <div class="access-controls">
+            <input id="apiKey" name="apiKey" type="password" inputmode="text" spellcheck="false" autocomplete="off" required>
+            <button type="submit" aria-label="提交 API Key 并开始运行" title="提交 API Key 并开始运行">
+              <span>开始运行</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+            </button>
+          </div>
+          <p class="access-message" id="accessMessage" aria-live="polite"></p>
+        </form>
+      </div>
+    </section>
     <main class="expedition-shell">
       <header class="topbar">
         <div class="brand-lockup">

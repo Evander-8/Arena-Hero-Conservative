@@ -77,20 +77,7 @@ env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY \
 
 ## 运行
 
-推荐在项目根目录创建 `.env`（已加入 `.gitignore`，不会提交到 Git）。可以从
-示例文件开始：
-
-```powershell
-Copy-Item .env.example .env
-```
-
-然后编辑 `.env`，填入 API Key：
-
-```dotenv
-ARENA_HERO_API_KEY=your-api-key
-```
-
-然后直接运行：
+启动时不需要在终端或 `.env` 中填写 API Key，直接运行策略：
 
 ```bash
 .venv/bin/python tactic.py
@@ -102,17 +89,10 @@ Windows PowerShell：
 .\.venv\Scripts\python.exe tactic.py
 ```
 
-也可以通过环境变量提供 API key（不会写入代码或日志）：
-
-```bash
-ARENA_HERO_API_KEY='your-api-key' python tactic.py
-```
-
-没有配置 `.env` 或环境变量时，脚本会提示输入 key：
-
-```bash
-python tactic.py
-```
+启动后打开 Dashboard，在页面的 API Key 输入框提交 Key，提交成功后才会连接
+Arena Hero 并发送计划。Key 只保存在当前 Python 进程内，不写入 `.env`、日志或
+Dashboard 状态接口。关闭或刷新浏览器页面不会停止已经启动的策略；只有停止或
+重启 Python/systemd 服务后才需要再次打开页面填写 Key。
 
 策略默认连接生产 API，使用 SDK 自带的 WebSocket 重连和安全重试。当前生产目标是
 人口 30，即 Core 资源容量达到 `30 × 5 = 150` 后停止购买；人口未满时会在 Worker、
@@ -161,12 +141,13 @@ Arena Hero 官网过去的探索历史保存在官网域名自己的 IndexedDB �
 从本版本开始，策略实际观察到的探索范围会在重启后持续保留。
 
 Dashboard 使用固定端口，默认始终为 `8765`。端口被占用时程序会明确报错并
-终止启动，不会自动切换到其他端口。也可以显式指定另一个固定端口或关闭面板：
+终止启动，不会自动切换到其他端口。也可以显式指定另一个固定端口：
 
 ```bash
 ARENA_HERO_DASHBOARD_PORT=9000 python tactic.py
-ARENA_HERO_DASHBOARD=0 python tactic.py
 ```
+
+页面 Key 模式要求 Dashboard 保持启用；设置 `ARENA_HERO_DASHBOARD=0` 会直接退出。
 
 本地面板也可以直接检查：
 
@@ -179,8 +160,8 @@ Invoke-RestMethod http://127.0.0.1:8765/api/state
 
 ## 服务器部署
 
-仓库提供了适用于 Linux `systemd` 的部署文件，包含独立运行用户、受保护的 API Key
-环境文件、持久化状态目录、自动重启以及可选的 Nginx 密码保护配置。完整步骤见
+仓库提供了适用于 Linux `systemd` 的部署文件，包含独立运行用户、受保护的运行环境
+文件、持久化状态目录、自动重启以及可选的 Nginx 密码保护配置。完整步骤见
 [`deploy/README.md`](deploy/README.md)。
 
 如果云服务器无法连接 GitHub，不需要在服务器执行 `git pull`：在本地按

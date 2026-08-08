@@ -23,6 +23,50 @@ button { font: inherit; }
 button, canvas { touch-action: manipulation; }
 h1, h2, p { margin: 0; }
 
+.access-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(24, 37, 34, .84);
+}
+.access-gate[hidden] { display: none; }
+.access-panel {
+  width: min(100%, 520px);
+  padding: 28px;
+  border: 3px solid var(--ink);
+  border-top: 8px solid var(--amber);
+  border-radius: 3px;
+  background: var(--paper-2);
+  box-shadow: 10px 10px 0 rgba(0, 0, 0, .26);
+}
+.access-mark {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 18px;
+  border: 2px solid var(--ink);
+  background: var(--teal);
+  transform: rotate(45deg);
+}
+.access-mark span { width: 14px; height: 14px; border: 3px solid var(--paper-2); }
+.access-panel > .panel-kicker { color: var(--teal-dark); font-size: 9px; font-weight: 900; letter-spacing: .08em; }
+.access-panel h1 { margin-top: 7px; font-family: Impact, "Arial Narrow", sans-serif; font-size: 30px; line-height: 1; }
+.access-panel > p, .access-panel form > p { margin-top: 12px; color: #56615d; font-size: 12px; line-height: 1.55; }
+.access-panel label { display: block; margin-top: 22px; color: var(--teal-dark); font-size: 10px; font-weight: 900; }
+.access-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 7px; }
+.access-controls input { min-width: 0; height: 42px; padding: 0 11px; border: 2px solid var(--ink); border-radius: 2px; background: #fffdf7; color: var(--ink); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.access-controls input:focus { outline: 3px solid var(--amber-light); outline-offset: 1px; }
+.access-controls button { min-height: 42px; padding: 0 13px; display: inline-flex; align-items: center; gap: 8px; border: 2px solid var(--ink); border-radius: 2px; background: var(--teal); color: #fff; cursor: pointer; font-size: 11px; font-weight: 900; }
+.access-controls button:hover { background: var(--teal-dark); }
+.access-controls button:disabled { cursor: wait; opacity: .65; }
+.access-controls button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; }
+.access-message { min-height: 18px; color: var(--rust) !important; font-weight: 800; }
+.access-message[data-state="ok"] { color: var(--teal-dark) !important; }
+
 .expedition-shell {
   width: 100%;
   height: 100dvh;
@@ -227,6 +271,9 @@ button:focus-visible { outline: 3px solid var(--amber-light); outline-offset: 2p
   .model-bay { height: 180px; }
   .unit-card { grid-template-columns: 48px minmax(0,1fr); min-height: 72px; }
   .unit-card canvas { width: 48px; height: 48px; }
+  .access-panel { padding: 22px 18px; }
+  .access-controls { grid-template-columns: 1fr; }
+  .access-controls button { justify-content: center; }
   .event-tape { grid-template-columns: 94px minmax(0,1fr); min-height: 68px; }
   .event-window { height: 52px; }
   .event-window li { white-space: normal; line-height: 1.35; }
