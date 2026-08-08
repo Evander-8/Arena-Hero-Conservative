@@ -1,75 +1,71 @@
-# Linux Server Deployment
+# Linux 云服务器部署
 
-This is the supported Debian/Ubuntu cloud deployment path. It keeps exactly one
-tactic process running under `systemd`, accepts the API key through the local
-Dashboard after startup, persists the exploration map and operator statistics, and keeps the
-Dashboard bound to loopback. The current tactic grows the living fleet until
-population 30, which gives the Core `max(10, 30 * 5) = 150` resource capacity.
-One Vanguard and one Ranger stay near the Core; the remaining combat units
-explore, fight visible enemies, pursue visible enemy Cores, and collect the
-Beacon when safe.
+项目在 Debian/Ubuntu 上通过 `systemd` 长期运行。第一次使用本项目时，请完整执行
+“首次部署”；只有服务器已经存在项目、`.venv`、配置和依赖时，才执行“更新已有服务器”。
 
-## Server layout
+Dashboard 默认只监听 `127.0.0.1:8765`。API Key 在服务启动后从页面提交，不写入代码、
+压缩包或环境文件。
 
-| Path | Purpose |
+## 服务器目录
+
+| 路径 | 用途 |
 |---|---|
-| `/opt/arena-hero-conservative` | Git checkout and Python virtual environment |
-| `/var/lib/arena-hero-conservative` | Persistent map and operator statistics |
-| `/etc/arena-hero-conservative/arena-hero.env` | Dashboard and runtime settings |
-| `/etc/systemd/system/arena-hero.service` | Long-running service definition |
+| `/opt/arena-hero-conservative` | 项目代码和 `.venv` |
+| `/etc/arena-hero-conservative/arena-hero.env` | Dashboard 与状态目录配置 |
+| `/var/lib/arena-hero-conservative` | 探索地图和统计数据 |
+| `/etc/systemd/system/arena-hero.service` | systemd 服务 |
 
-Do not run a second tactic process with the same Arena Hero account. All Agent
-clients share one plan slot, so another process can replace this service's plan.
+同一 Arena Hero 账号只能运行一个策略进程，否则多个进程会互相覆盖计划。
 
-## 部署路径选择（先看）
+## 首次部署
 
-下文的“项目根目录”统一指 `/opt/arena-hero-conservative`，不是 `/root`，也不是
-登录后提示符所在的 `~`。只选择一种流程：
+本节面向从未部署过本项目的新服务器。
 
-- 全新服务器、没有旧项目：按第 1 到第 5 节执行。
-- 已有项目、服务器无法连接 GitHub：执行 **Offline update**。
-- 已有 Git 仓库、服务器可以连接 GitHub：执行 **Online Git update**。
+### 1. 在本地获取代码并打包
 
-不要在已有部署上重复执行 `useradd`、`git clone` 或创建 `.venv`。无论选择哪种
-流程，Python/systemd 进程每次重启都会清除内存中的 Key；服务启动后要重新打开
-Dashboard 提交一次 Key。
+在本地 PowerShell 中执行：
 
-## 1. Install prerequisites
+```powershell
+git clone https://github.com/Evander-8/Arena-Hero-Conservative.git
+cd Arena-Hero-Conservative
 
-The server needs Git and Python 3.11 or newer. On Debian or Ubuntu:
+$release = "arena-hero-release-$(Get-Date -Format yyyyMMdd-HHmmss).tar.gz"
+tar --exclude=.git --exclude=.venv --exclude=__pycache__ `
+    --exclude=.env --exclude='*.log' `
+    --exclude='.arena-hero-dashboard-*.json*' `
+    --exclude='arena-hero-release-*.tar.gz' `
+    -czf $release .
 
-```bash
-sudo apt update
-sudo apt install -y git python3 python3-venv ca-certificates
-python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+scp $release "root@服务器IP:/tmp/"
 ```
 
-If the version check fails, install a newer Python from the server
-distribution before continuing.
+压缩包包含代码、测试、依赖声明和部署模板，不包含 `.git`、`.venv`、API Key、日志或
+运行状态。
 
-Optional connectivity checks:
+### 2. 安装系统依赖并解压项目
 
-```bash
-getent hosts api.arenahero.io
-curl --fail --silent --show-error --max-time 15 https://api.arenahero.io/health || true
-```
-
-Do not disable the host firewall to make the tactic work. Allow outbound HTTPS
-and keep the Dashboard port private.
-
-## 2. Clone and install
+登录服务器后执行：
 
 ```bash
-sudo useradd --system \
+apt update
+apt install -y python3 python3-venv ca-certificates
+
+useradd --system \
   --home-dir /opt/arena-hero-conservative \
   --shell /usr/sbin/nologin arena-hero
 
-sudo git clone \
-  https://github.com/Evander-8/Arena-Hero-Conservative.git \
+install -d -m 0750 -o arena-hero -g arena-hero \
   /opt/arena-hero-conservative
 
-sudo chown -R arena-hero:arena-hero /opt/arena-hero-conservative
+release=$(ls -1t /tmp/arena-hero-release-*.tar.gz | head -n 1)
+test -n "$release" && test -f "$release"
+tar -xzf "$release" -C /opt/arena-hero-conservative
+chown -R arena-hero:arena-hero /opt/arena-hero-conservative
+```
 
+### 3. 创建虚拟环境并安装 Python 依赖
+
+```bash
 sudo -u arena-hero python3 -m venv \
   /opt/arena-hero-conservative/.venv
 
@@ -79,147 +75,116 @@ sudo -u arena-hero \
 
 cd /opt/arena-hero-conservative
 sudo -u arena-hero .venv/bin/python -m pip check
-sudo -u arena-hero .venv/bin/python -m unittest discover -s tests
+sudo -u arena-hero .venv/bin/python -m py_compile tactic.py dashboard.py
 ```
 
-## 3. Configure runtime settings
+### 4. 安装运行配置和 systemd 服务
 
 ```bash
-sudo install -d -m 0750 \
+install -d -m 0750 \
   -o root -g arena-hero /etc/arena-hero-conservative
 
-sudo install -m 0640 \
+install -m 0640 \
   -o root -g arena-hero \
   /opt/arena-hero-conservative/deploy/arena-hero.env.example \
   /etc/arena-hero-conservative/arena-hero.env
 
-sudoedit /etc/arena-hero-conservative/arena-hero.env
-```
-
-Keep `ARENA_HERO_DASHBOARD=1`. Do not put the API Key in this file or in the Git
-repository. Submit it through the Dashboard after the service starts; it remains
-in the running Python process memory only.
-
-## 4. Install and start the service
-
-```bash
-sudo install -m 0644 \
+install -m 0644 \
   /opt/arena-hero-conservative/deploy/arena-hero.service \
   /etc/systemd/system/arena-hero.service
 
-sudo systemctl daemon-reload
-sudo systemctl enable --now arena-hero.service
-sudo systemctl status arena-hero.service --no-pager
+systemctl daemon-reload
+systemctl enable --now arena-hero.service
+systemctl status arena-hero.service --no-pager
 ```
 
-At this point the service is expected to stay active with Dashboard status
-`awaiting-key`. Starting the service does not connect to Arena Hero by itself.
+显示 `active (running)` 即表示服务启动成功。首次启动时 Dashboard 状态为
+`awaiting-key`，这是正常状态。
 
-Follow live logs with:
+### 5. 打开 Dashboard 并提交 Key
+
+不要把服务器的 `8765` 端口直接暴露到公网。在本地电脑建立 SSH 隧道：
 
 ```bash
-sudo journalctl -u arena-hero.service -f
+ssh -L 18765:127.0.0.1:8765 root@服务器IP
 ```
 
-The logs should show a dashboard URL on `127.0.0.1` and a process waiting for a
-page Key. Open the Dashboard, enter the API Key, and submit it once. Accepted
-Tick submissions should then appear in the logs.
+在本地打开 `http://127.0.0.1:18765`，填写 API Key。状态变为 `connected` 后程序开始
+发送计划。关闭网页不会停止程序；只有服务重新启动后才需要再次填写 Key。
 
-Verify the local API from the server:
+## 更新已有服务器
+
+本节只适用于已经完成首次部署，并且以下文件都存在的服务器：
+
+```text
+/opt/arena-hero-conservative/.venv/bin/python
+/etc/arena-hero-conservative/arena-hero.env
+/etc/systemd/system/arena-hero.service
+```
+
+### 1. 本地重新打包并上传
+
+进入本地项目根目录，执行与首次部署相同的打包命令：
+
+```powershell
+$release = "arena-hero-release-$(Get-Date -Format yyyyMMdd-HHmmss).tar.gz"
+tar --exclude=.git --exclude=.venv --exclude=__pycache__ `
+    --exclude=.env --exclude='*.log' `
+    --exclude='.arena-hero-dashboard-*.json*' `
+    --exclude='arena-hero-release-*.tar.gz' `
+    -czf $release .
+
+scp $release "root@服务器IP:/tmp/"
+```
+
+### 2. 服务器覆盖代码并启动
 
 ```bash
-curl --fail --silent http://127.0.0.1:8765/api/state | python3 -m json.tool | head -80
+release=$(ls -1t /tmp/arena-hero-release-*.tar.gz | head -n 1)
+test -n "$release" && test -f "$release"
+test -x /opt/arena-hero-conservative/.venv/bin/python
+
+systemctl stop arena-hero.service
+tar -xzf "$release" -C /opt/arena-hero-conservative
+rm -f /opt/arena-hero-conservative/deploy/update-server.sh
+chown -R arena-hero:arena-hero /opt/arena-hero-conservative
+
+cd /opt/arena-hero-conservative
+sudo -u arena-hero .venv/bin/python -m py_compile tactic.py dashboard.py
+
+install -m 0644 deploy/arena-hero.service \
+  /etc/systemd/system/arena-hero.service
+systemctl daemon-reload
+systemctl reset-failed arena-hero.service
+systemctl start arena-hero.service
+systemctl status arena-hero.service --no-pager
 ```
 
-Before submitting the Key, `runtime.status` is `awaiting-key`. After submission,
-look for `runtime.status` equal to `connected`, a growing `sequence`, and
-`acceptedSubmissions` greater than zero. Closing or refreshing the browser does
-not stop the strategy while the service process remains alive, so the Key is not
-requested again. A second tactic process for the same
-Arena Hero account can overwrite the Agent plan, so stop duplicate processes
-before interpreting stale Dashboard data.
-
-## 5. Open the dashboard securely
-
-Keep TCP port `8765` closed to the public Internet. From the local computer,
-create an SSH tunnel:
-
-```bash
-ssh -L 18765:127.0.0.1:8765 your-user@your-server
-```
-
-Then open `http://127.0.0.1:18765` locally. Using local port `18765` avoids a
-collision when a local development instance already uses `8765`.
-
-### Optional Nginx access
-
-For a domain, install Nginx and password protection:
-
-```bash
-sudo apt install -y nginx apache2-utils
-sudo htpasswd -c /etc/nginx/.htpasswd-arena-hero your-dashboard-user
-sudo cp \
-  /opt/arena-hero-conservative/deploy/nginx-arena-hero.conf \
-  /etc/nginx/sites-available/arena-hero
-sudoedit /etc/nginx/sites-available/arena-hero
-sudo ln -s /etc/nginx/sites-available/arena-hero \
-  /etc/nginx/sites-enabled/arena-hero
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-Replace `arena.example.com` before enabling the configuration. The `/api/key`
-request contains the API Key, so do not submit it through a public HTTP-only
-site. Basic Auth is access control, not encryption; add HTTPS first.
-
-For HTTPS with Certbot:
-
-```bash
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d arena.example.com
-```
-
-Keep Basic Auth enabled even after adding TLS.
-
-## 更新现有服务器
-
-服务器已经有项目、`.venv`、配置和依赖时，不需要重新部署环境。在服务器只执行这一
-条命令：
-
-```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/Evander-8/Arena-Hero-Conservative/main/deploy/update-server.sh \
-  | sudo bash
-```
-
-脚本会直接从
-`https://github.com/Evander-8/Arena-Hero-Conservative.git` 获取最新代码，然后启动
-`arena-hero.service`。它不会删除已有 `.venv`、
+更新只覆盖项目代码，不删除已有 `.venv`、
 `/etc/arena-hero-conservative/arena-hero.env` 或
-`/var/lib/arena-hero-conservative`。如果更新失败，脚本会重新启动原服务。
+`/var/lib/arena-hero-conservative`。服务重新启动后，需要在 Dashboard 再提交一次 Key。
 
-服务重启后 Dashboard 显示 `awaiting-key` 是正常状态。重新在页面提交一次 Key 后，程序
-就会继续发送计划；关闭网页不会停止已经运行的程序。
+## 使用域名访问 Dashboard
 
-## Common checks
+如果使用域名反向代理，应启用 HTTPS 和访问认证。仓库中的
+`deploy/nginx-arena-hero.conf` 可作为 Nginx 配置模板。不要通过公网 HTTP 明文提交
+API Key。
+
+## 检查与排错
 
 ```bash
-sudo systemctl is-active arena-hero.service
-sudo journalctl -u arena-hero.service -n 100 --no-pager
+systemctl is-active arena-hero.service
+journalctl -u arena-hero.service -n 100 --no-pager
 curl --fail http://127.0.0.1:8765/api/state
 ```
 
-If port `8765` is occupied, the service fails instead of selecting a fallback
-port. Inspect and stop the duplicate process, or change
-`ARENA_HERO_DASHBOARD_PORT` in the systemd environment file and update the SSH
-tunnel/Nginx upstream consistently.
+- `runtime.status=awaiting-key`：打开 Dashboard 提交 Key。
+- `runtime.status=connected`：程序已连接，确认 `acceptedSubmissions` 持续增加。
+- `can't open file ... tactic.py`：代码没有完整解压，重新上传压缩包并覆盖解压。
+- `ModuleNotFoundError`：先 `cd /opt/arena-hero-conservative`，再使用 `.venv/bin/python`
+  执行检查。
+- 端口 `8765` 被占用：停止重复的 `tactic.py` 进程，不要同时运行手动进程和 systemd
+  服务。
 
-If `runtime.status` is `awaiting-key`, open the Dashboard and submit the Key. If
-it is `error`, check DNS, outbound HTTPS, proxy environment variables, SDK
-compatibility, and the service journal. Do not print the API Key while
-debugging. If a proxy is configured, keep the `python-socks` dependency
-installed.
-
-If the Dashboard page loads but live updates stop behind Nginx, confirm the
-supplied Nginx configuration has buffering disabled and a long read timeout for
-the `/api/events` stream.
+服务器必须允许程序访问 `api.arenahero.io:443`。服务器无法访问 GitHub 不影响离线部署
+和更新，但首次安装 Python 依赖时仍需访问可用的 Python 软件源。

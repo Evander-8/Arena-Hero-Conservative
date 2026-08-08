@@ -192,18 +192,22 @@ Invoke-RestMethod http://127.0.0.1:8765/api/state
 
 ## 服务器部署
 
-仓库提供了适用于 Linux `systemd` 的部署文件，包含独立运行用户、受保护的运行环境
-文件、持久化状态目录、自动重启以及可选的 Nginx 密码保护配置。完整步骤见
-[`deploy/README.md`](deploy/README.md)。
+第一次使用本项目时，必须先完成服务器初始化，不能直接执行“更新代码”的命令。首次
+部署包含以下步骤：
 
-云服务器已有项目和依赖时，更新只需要执行一次更新脚本。脚本会从
-`https://github.com/Evander-8/Arena-Hero-Conservative.git` 获取最新代码并启动服务，
-同时保留 `.venv`、服务器配置和 `/var/lib/arena-hero-conservative` 中的运行状态。见
-[`deploy/README.md`](deploy/README.md) 的“更新现有服务器”。
+1. 在本地从 GitHub 获取代码，生成离线压缩包并上传服务器。
+2. 在服务器安装 Python，创建 `arena-hero` 运行用户和项目目录。
+3. 解压代码，创建 `.venv` 并安装 `requirements.txt`。
+4. 安装环境配置和 `arena-hero.service`，然后启动服务。
+5. 通过 SSH 隧道打开 Dashboard 并提交 API Key。
 
-服务器部署建议保持 Dashboard 监听 `127.0.0.1`，通过 SSH 隧道或带 HTTPS/密码保护的
-Nginx 访问，不要直接将 `8765` 端口暴露到公网。可通过 `ARENA_HERO_STATE_DIR` 将地图
-和统计保存到独立目录；systemd 模板默认使用 `/var/lib/arena-hero-conservative`。
+服务器已经完成首次部署后，后续更新才可以只覆盖代码并重启服务。更新时会保留
+`.venv`、`/etc/arena-hero-conservative/arena-hero.env` 和
+`/var/lib/arena-hero-conservative`。
+
+完整的首次部署命令、更新命令、Dashboard 访问和排错说明见
+[`deploy/README.md`](deploy/README.md)。Dashboard 应监听 `127.0.0.1`，不要直接把
+端口 `8765` 暴露到公网。
 
 ## 检查
 
