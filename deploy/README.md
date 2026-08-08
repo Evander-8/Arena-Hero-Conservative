@@ -180,6 +180,7 @@ $release = "arena-hero-release-$(Get-Date -Format yyyyMMdd-HHmmss).tar.gz"
 tar --exclude=.git --exclude=.venv --exclude=__pycache__ `
     --exclude=.env --exclude='*.log' `
     --exclude='.arena-hero-dashboard-*.json*' `
+    --exclude='arena-hero-release-*.tar.gz' `
     -czf $release .
 ```
 
@@ -219,8 +220,9 @@ Replace only the application source. This preserves the existing `.venv`, the
 server-side `.env` location, and `/var/lib/arena-hero-conservative`:
 
 ```bash
+backup=/opt/arena-hero-conservative.previous-$(date +%Y%m%d-%H%M%S)
 sudo mv /opt/arena-hero-conservative \
-  /opt/arena-hero-conservative.previous
+  "$backup"
 sudo install -d -m 0750 -o arena-hero -g arena-hero \
   /opt/arena-hero-conservative
 sudo tar -xzf "$release" -C /opt/arena-hero-conservative
@@ -231,7 +233,7 @@ Restore the existing virtual environment from the previous directory, then
 remove the temporary old checkout after verification:
 
 ```bash
-sudo mv /opt/arena-hero-conservative.previous/.venv \
+sudo mv "$backup/.venv" \
   /opt/arena-hero-conservative/.venv
 sudo chown -R arena-hero:arena-hero /opt/arena-hero-conservative/.venv
 ```
@@ -241,6 +243,7 @@ need GitHub; they use the configured Python package index or an existing local
 package cache:
 
 ```bash
+cd /opt/arena-hero-conservative
 sudo -u arena-hero .venv/bin/python -m pip install -r requirements.txt
 sudo -u arena-hero .venv/bin/python -m pip check
 sudo -u arena-hero .venv/bin/python -m unittest discover -s tests
@@ -273,7 +276,7 @@ Only after the new service is connected and submitting Ticks should you remove
 the previous checkout:
 
 ```bash
-sudo rm -rf /opt/arena-hero-conservative.previous
+sudo rm -rf "$backup"
 ```
 
 The old checkout is recoverable from the code backup until that cleanup command

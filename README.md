@@ -56,6 +56,16 @@ uv pip install -r requirements.txt
 `python -m pip install -r requirements.txt`。不要直接向 macOS 或 uv 管理的
 系统 Python 安装依赖；这会触发 PEP 668 的 `externally-managed-environment`。
 
+Windows PowerShell 使用项目自带的虚拟环境时，可以直接运行：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+后续测试和启动也建议使用 `.venv\Scripts\python.exe`，避免调用到系统中
+其他版本的 Python。
+
 如果运行时出现 `connecting through a SOCKS proxy requires python-socks`，重新执行
 `uv pip install -r requirements.txt` 即可安装 SOCKS 支持。如果当前网络不需要代理，
 也可以在本次运行前临时清除代理变量：
@@ -67,7 +77,14 @@ env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY \
 
 ## 运行
 
-推荐在项目根目录创建 `.env`（已加入 `.gitignore`，不会提交到 Git）：
+推荐在项目根目录创建 `.env`（已加入 `.gitignore`，不会提交到 Git）。可以从
+示例文件开始：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+然后编辑 `.env`，填入 API Key：
 
 ```dotenv
 ARENA_HERO_API_KEY=your-api-key
@@ -76,7 +93,13 @@ ARENA_HERO_API_KEY=your-api-key
 然后直接运行：
 
 ```bash
-python tactic.py
+.venv/bin/python tactic.py
+```
+
+Windows PowerShell：
+
+```powershell
+.\.venv\Scripts\python.exe tactic.py
 ```
 
 也可以通过环境变量提供 API key（不会写入代码或日志）：
@@ -97,6 +120,16 @@ Vanguard、Ranger 之间按防守缺口、经济需求和远征编队动态分�
 Vanguard 和 1 个 Ranger 在 Core 附近巡逻，其余战斗单位远程探索、接敌、攻击可见敌方
 Core，并在低血量或威胁过多时撤回。共享永久世界中的敌方行为不可预测，因此不把它
 描述为绝对最优。
+
+同一个 Arena Hero 账号只能运行一个战术进程。Agent 计划按账号共享，第二个进程
+会覆盖第一个进程的计划；本地测试前应先停止云服务器上的 `arena-hero.service`，
+测试结束后再恢复云端服务。
+
+战斗单位没有脱战自动回血。受伤的 Vanguard/Ranger 会先分配一个单位进入 Core
+治疗位，其他伤员在 Core 视野内的独立候诊格等待；Core 每次最多容纳 Core 加一个
+单位。治疗需要 Core 资源，资源不足时伤员会主动腾出 Core，让 Worker 能够存入资源。
+满血守卫不会因为候诊逻辑长期占位；如果 Dashboard 中同一单位连续多个 Tick 都是
+`action: null`，应优先检查障碍、友军拥堵和是否启动了重复进程。
 
 ## 实时面板
 
@@ -135,6 +168,15 @@ ARENA_HERO_DASHBOARD_PORT=9000 python tactic.py
 ARENA_HERO_DASHBOARD=0 python tactic.py
 ```
 
+本地面板也可以直接检查：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/api/state
+```
+
+确认返回的 `runtime.status` 为 `connected`，并且 `runtime.acceptedSubmissions`
+持续增加。端口被占用时不要再启动第二个 `tactic.py`，先查找并停止旧进程。
+
 ## 服务器部署
 
 仓库提供了适用于 Linux `systemd` 的部署文件，包含独立运行用户、受保护的 API Key
@@ -145,6 +187,18 @@ ARENA_HERO_DASHBOARD=0 python tactic.py
 [`deploy/README.md`](deploy/README.md) 的“Offline update”流程打包源码并上传，服务器
 会在保留 `.venv`、API key 配置和 `/var/lib/arena-hero-conservative` 运行状态的前提下覆盖
 应用代码。
+
+如果服务器可以连接 GitHub，标准同步流程是：
+
+```bash
+git status
+git add README.md deploy/README.md tactic.py tests
+git commit -m "Describe the update"
+git push origin main
+```
+
+服务器端再按 [`deploy/README.md`](deploy/README.md) 的“Update an existing
+deployment”流程执行测试和重启。不要提交 `.env`、运行日志、`.venv` 或离线压缩包。
 
 服务器部署建议保持 Dashboard 监听 `127.0.0.1`，通过 SSH 隧道或带 HTTPS/密码保护的
 Nginx 访问，不要直接将 `8765` 端口暴露到公网。可通过 `ARENA_HERO_STATE_DIR` 将地图
@@ -162,4 +216,10 @@ python -m unittest discover -s tests -v
 
 ```bash
 python -m compileall -q .
+```
+
+依赖检查：
+
+```bash
+python -m pip check
 ```
