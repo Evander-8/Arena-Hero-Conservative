@@ -481,6 +481,9 @@ class TacticMemory:
     scout_goal: dict[str, Position] = field(default_factory=dict)
     scout_distance: dict[str, int] = field(default_factory=dict)
     scout_stall: dict[str, int] = field(default_factory=dict)
+    expedition_goal: dict[str, Position] = field(default_factory=dict)
+    expedition_distance: dict[str, int] = field(default_factory=dict)
+    expedition_stall: dict[str, int] = field(default_factory=dict)
     last_positions: dict[str, Position] = field(default_factory=dict)
     previous_positions: dict[str, Position] = field(default_factory=dict)
     core_alert_until: int = 0
@@ -561,6 +564,9 @@ class TacticMemory:
                 self.scout_goal.clear()
                 self.scout_distance.clear()
                 self.scout_stall.clear()
+                self.expedition_goal.clear()
+                self.expedition_distance.clear()
+                self.expedition_stall.clear()
             self.last_core_position = core_position
             self.known_resources = {
                 resource
@@ -630,6 +636,28 @@ class TacticMemory:
                 self.scout_distance[worker_id] = distance
                 self.scout_stall[worker_id] = stalled
 
+        for unit_id, goal in tuple(self.expedition_goal.items()):
+            if unit_id not in live_unit_ids:
+                self.expedition_goal.pop(unit_id, None)
+                self.expedition_distance.pop(unit_id, None)
+                self.expedition_stall.pop(unit_id, None)
+                continue
+            unit = next(unit for unit in turn.units if _object_key(unit) == unit_id)
+            distance = _manhattan(_position(unit), goal)
+            previous_distance = self.expedition_distance.get(unit_id)
+            stalled = self.expedition_stall.get(unit_id, 0)
+            if previous_distance is not None and distance >= previous_distance:
+                stalled += 1
+            else:
+                stalled = 0
+            if goal in self.known_obstacles or distance <= 1 or stalled >= 4:
+                self.expedition_goal.pop(unit_id, None)
+                self.expedition_distance.pop(unit_id, None)
+                self.expedition_stall.pop(unit_id, None)
+            else:
+                self.expedition_distance[unit_id] = distance
+                self.expedition_stall[unit_id] = stalled
+
     def core_alerted(self, tick: int) -> bool:
         return tick <= self.core_alert_until
 
@@ -695,7 +723,12 @@ class TacticMemory:
         ):
             return goal
 
-        ring_index = self.scout_ring_index.get(worker_id, 0)
+        # Start workers on different rings so a new fleet fans out from the
+        # Core instead of forming one traffic column around the first ring.
+        ring_index = self.scout_ring_index.get(
+            worker_id,
+            worker_index % len(RESOURCE_SCOUT_RADII),
+        )
         step = self.scout_step.get(worker_id, 0)
         candidate_count = sum(
             len(_square_ring_waypoints((0, 0), radius))
@@ -722,6 +755,37 @@ class TacticMemory:
         self.scout_goal[worker_id] = core
         self.scout_distance[worker_id] = _manhattan(_position(worker), core)
         self.scout_stall[worker_id] = 0
+        return core
+
+    def expedition_goal_for(self, unit: Any, core: Position) -> Position:
+        """Keep expedition units on a stable outer-ring route."""
+
+        unit_id = _object_key(unit)
+        current = _position(unit)
+        goal = self.expedition_goal.get(unit_id)
+        if (
+            goal is not None
+            and goal not in self.known_obstacles
+            and _manhattan(current, goal) > 1
+        ):
+            return goal
+
+        radii = tuple(sorted(set(RESOURCE_SCOUT_RADII))[-2:])
+        seed = sum(ord(char) for char in unit_id)
+        ring_index = (seed + len(self.expedition_goal)) % len(radii)
+        route = _square_ring_waypoints(core, radii[ring_index])
+        if route:
+            offset = seed % len(route)
+            for candidate in route[offset:] + route[:offset]:
+                if candidate not in self.known_obstacles:
+                    self.expedition_goal[unit_id] = candidate
+                    self.expedition_distance[unit_id] = _manhattan(current, candidate)
+                    self.expedition_stall[unit_id] = 0
+                    return candidate
+
+        self.expedition_goal[unit_id] = core
+        self.expedition_distance[unit_id] = _manhattan(current, core)
+        self.expedition_stall[unit_id] = 0
         return core
 
 
@@ -938,23 +1002,6 @@ def _group_visible_enemies(
     )
 
 
-def _expedition_goal(
-    core: Position,
-    unit: Any,
-    phase: int = 0,
-    *,
-    far: bool = False,
-) -> Position:
-    """Select a deterministic world-exploration waypoint for an expedition unit."""
-
-    radii = RESOURCE_SCOUT_RADII
-    radius_index = (len(radii) - 1 if far else 0) + phase
-    seed = sum(ord(char) for char in _object_key(unit)) + radius_index
-    radius = radii[radius_index % len(radii)]
-    route = _square_ring_waypoints(core, radius)
-    return route[seed % len(route)] if route else core
-
-
 def _unit_max_hp(unit: Any) -> int:
     maximum = {
         "VANGUARD": MAX_VANGUARD_HP,
@@ -1046,7 +1093,14 @@ def _queue_combat_action(
             enemy_position,
             terrain_obstacles,
         ):
-            unit.shoot(target)
+            # Target-free cell fire retargets whichever hostile occupies the
+            # cell after movement. Precision fire carries target_id and must
+            # miss when that enemy moves before combat resolves.
+            shoot_cell = getattr(unit, "shoot_cell", None)
+            if callable(shoot_cell):
+                shoot_cell(enemy_position)
+            else:
+                unit.shoot(target)
             return False
         if combat_type == "VANGUARD":
             attack_goals = tuple(
@@ -1263,17 +1317,24 @@ def _spawn_choice(turn: Any, core_alert: bool) -> Any:
         return UnitType.VANGUARD
     if core_alert and missing_ranger:
         return UnitType.RANGER
+
+    combat = len(turn.vanguards) + len(turn.rangers)
+    # Catch the economy up before adding another combat unit. This prevents a
+    # large combat burst from starving the Worker fleet and Core income.
+    desired_workers = min(
+        WORKER_TARGET,
+        max(BOOTSTRAP_WORKER_TARGET, population // 2),
+    )
+    if not core_alert and workers < desired_workers:
+        return UnitType.WORKER
+
     if missing_vanguard:
         return UnitType.VANGUARD
     if missing_ranger:
         return UnitType.RANGER
 
-    combat = len(turn.vanguards) + len(turn.rangers)
     # Build enough workers to sustain the economy, then alternate combat types
     # so each new pair can form a Vanguard/Ranger expedition team.
-    desired_workers = min(WORKER_TARGET, max(BOOTSTRAP_WORKER_TARGET, population // 2))
-    if workers < desired_workers and workers <= combat + 4:
-        return UnitType.WORKER
     if len(turn.rangers) <= len(turn.vanguards):
         return UnitType.RANGER
     if workers < FINAL_WORKER_TARGET:
@@ -1436,10 +1497,13 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
     assignments = memory.assign_resources(turn.workers)
     workers = tuple(sorted(turn.workers, key=_object_key))
     for worker_index, worker in enumerate(workers):
+        worker_obstacles = traffic_obstacles | (
+            friendly_positions - {_position(worker)}
+        )
         moved = _queue_worker_action(
             turn,
             worker,
-            traffic_obstacles,
+            worker_obstacles,
             memory,
             assignments.get(_object_key(worker)),
             worker_index,
@@ -1572,12 +1636,17 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
                 occupancy,
             )
         else:
-            expedition_goal = _expedition_goal(
-                core_position,
-                unit,
-                patrol_phase,
-                far=True,
-            )
+            expedition_goal = memory.expedition_goal_for(unit, core_position)
+            beacon = getattr(turn, "beacon", None)
+            beacon_status = _enum_value(getattr(beacon, "status", None))
+            if (
+                expedition_rangers
+                and unit is expedition_rangers[0]
+                and _beacon_ready(turn)
+                and beacon_status == "GROUND"
+                and getattr(beacon, "position", None) is not None
+            ):
+                expedition_goal = tuple(beacon.position)
         moved = _queue_vanguard_action(
             turn,
             unit,
@@ -1616,12 +1685,17 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
                 patrol_phase,
             )
         else:
-            expedition_goal = _expedition_goal(
-                core_position,
-                unit,
-                patrol_phase,
-                far=True,
-            )
+            expedition_goal = memory.expedition_goal_for(unit, core_position)
+            beacon = getattr(turn, "beacon", None)
+            beacon_status = _enum_value(getattr(beacon, "status", None))
+            if (
+                expedition_rangers
+                and unit is expedition_rangers[0]
+                and _beacon_ready(turn)
+                and beacon_status == "GROUND"
+                and getattr(beacon, "position", None) is not None
+            ):
+                expedition_goal = tuple(beacon.position)
         moved = _queue_ranger_action(
             turn,
             unit,

@@ -76,6 +76,9 @@ class FakeUnit:
     def shoot(self, target):
         self.actions.append(("shoot", target))
 
+    def shoot_cell(self, position):
+        self.actions.append(("shoot_cell", position))
+
 
 class FakeCore:
     def __init__(self, position=(0, 0), hp=5, shield=5):
@@ -253,7 +256,22 @@ class ResourceTacticTests(unittest.TestCase):
         )
         turn = FakeTurn(rangers=(ranger,), enemies=(enemy,), core=FakeCore((0, 0)))
         tactic.choose_actions(turn)
-        self.assertEqual(ranger.actions, [("shoot", enemy)])
+        self.assertEqual(ranger.actions, [("shoot_cell", (3, 0))])
+
+    def test_ranger_uses_cell_fire_for_a_moving_target(self):
+        ranger = FakeUnit((0, 0), hp=2, identifier="r")
+        enemy = FakeUnit(
+            (3, 0),
+            hp=1,
+            identifier="e",
+            unit_type=FakeUnitType.RANGER,
+            controlled=False,
+        )
+        turn = FakeTurn(rangers=(ranger,), enemies=(enemy,), core=FakeCore((0, 0)))
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(ranger.actions[0], ("shoot_cell", (3, 0)))
 
     def test_respawning_turn_queues_no_actions(self):
         worker = FakeUnit((0, 0), cargo=0)
@@ -723,6 +741,64 @@ class ResourceTacticTests(unittest.TestCase):
         tactic.choose_actions(turn, memory)
         self.assertEqual(len(memory.scout_goal), 2)
         self.assertEqual(len(set(memory.scout_goal.values())), 2)
+
+    def test_workers_start_on_different_search_rings(self):
+        workers = tuple(
+            FakeUnit((0, index), identifier=f"w{index}")
+            for index in range(4)
+        )
+        memory = tactic.TacticMemory()
+        turn = FakeTurn(workers=workers, core=FakeCore((0, 0)))
+
+        tactic.choose_actions(turn, memory)
+
+        radii = {
+            max(abs(goal[0]), abs(goal[1]))
+            for goal in memory.scout_goal.values()
+        }
+        self.assertGreaterEqual(len(radii), 3)
+
+    def test_expedition_units_get_stable_outer_search_goals(self):
+        vanguards = tuple(
+            FakeUnit((index + 1, 0), hp=4, identifier=f"v{index}", unit_type=FakeUnitType.VANGUARD)
+            for index in range(2)
+        )
+        rangers = tuple(
+            FakeUnit((index + 1, 1), hp=2, identifier=f"r{index}", unit_type=FakeUnitType.RANGER)
+            for index in range(2)
+        )
+        memory = tactic.TacticMemory()
+        turn = FakeTurn(vanguards=vanguards, rangers=rangers, core=FakeCore((0, 0)))
+
+        tactic.choose_actions(turn, memory)
+
+        self.assertEqual(len(memory.expedition_goal), 2)
+        self.assertTrue(
+            all(
+                max(abs(goal[0]), abs(goal[1])) >= 26
+                for goal in memory.expedition_goal.values()
+            )
+        )
+
+    def test_worker_production_catches_up_after_combat_burst(self):
+        workers = tuple(
+            FakeUnit((index + 1, 0), identifier=f"w{index}")
+            for index in range(2)
+        )
+        vanguards = tuple(
+            FakeUnit((index + 1, 3), hp=4, identifier=f"v{index}", unit_type=FakeUnitType.VANGUARD)
+            for index in range(6)
+        )
+        rangers = tuple(
+            FakeUnit((index + 1, 5), hp=2, identifier=f"r{index}", unit_type=FakeUnitType.RANGER)
+            for index in range(6)
+        )
+        core = FakeCore((0, 0))
+        turn = FakeTurn(workers=workers, vanguards=vanguards, rangers=rangers, resources=20, core=core)
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(core.actions, [("spawn", FakeUnitType.WORKER)])
 
     def test_scout_does_not_immediately_step_back_to_previous_cell(self):
         worker = FakeUnit((1, 0), identifier="w1")

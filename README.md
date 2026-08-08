@@ -2,9 +2,9 @@
 
 这是一个使用官方 `arena-hero` Python SDK 的资源优先型策略。它每个 Turn
 读取当前完整状态并提交一份完整计划：Worker 优先寻找当前可见资源并回 Core，
-Core 自动在经济与防御之间生产单位；Vanguard/Ranger 驻守 Core 周边，只在自卫
-或 Core 警戒时开火。没有可见资源时，Worker 会按稳定顺序做有限探路，不依赖
-过期的雾区记忆。
+Core 自动在经济与防御之间生产单位；保留一组 Vanguard/Ranger 守卫 Core，其余
+战斗单位沿外环远征、搜索可见敌人和敌方 Core。没有可见资源时，Worker 会按不同
+距离和方位分散探路，不依赖过期的雾区记忆。
 
 ## 参考策略
 
@@ -32,7 +32,8 @@ Core 自动在经济与防御之间生产单位；Vanguard/Ranger 驻守 Core �
 
 ## 当前生产与生存策略
 
-- 正常生产顺序：`4 Worker → 1 Vanguard → 6 Worker → 1 Ranger → 8 Worker → 2 Ranger`；
+- 正常状态下先补 4 Worker 和基础 Vanguard/Ranger 防卫；此后 Worker 少于当前人口
+  一半时优先补 Worker，最多生产到 14 个，避免战斗单位增长挤压经济；
 - 开局无敌情时允许用初始 5 资源直接购买第 2 个 Worker，不再强制保留 5 资源；
 - 单位若已在本 Tick 离开 Core 格，不再被误判为阻塞生产；新生 Vanguard/Ranger
   会主动前往守卫位，不会长期堵住生产格；
@@ -42,7 +43,9 @@ Core 自动在经济与防御之间生产单位；Vanguard/Ranger 驻守 Core �
 - 前期不主动拾取 Champion Beacon。只有经济、防卫、Core 状态和资源储备都达到
   安全阈值且当前无可见敌人时，才会机会性拾取。
 
-## 安装
+## 本地部署
+
+### 1. 安装
 
 需要 Python 3.11 或更高版本：
 
@@ -56,11 +59,14 @@ uv pip install -r requirements.txt
 `python -m pip install -r requirements.txt`。不要直接向 macOS 或 uv 管理的
 系统 Python 安装依赖；这会触发 PEP 668 的 `externally-managed-environment`。
 
-Windows PowerShell 使用项目自带的虚拟环境时，可以直接运行：
+Windows PowerShell 首次部署：
 
 ```powershell
-py -3.11 -m venv .venv
+py -3 -c "import sys; assert sys.version_info >= (3, 11), sys.version"
+py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
 后续测试和启动也建议使用 `.venv\Scripts\python.exe`，避免调用到系统中
@@ -75,7 +81,7 @@ env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY \
   -u http_proxy -u https_proxy python tactic.py
 ```
 
-## 运行
+### 2. 启动
 
 启动时不需要在终端或 `.env` 中填写 API Key，直接运行策略：
 
@@ -93,6 +99,32 @@ Windows PowerShell：
 Arena Hero 并发送计划。Key 只保存在当前 Python 进程内，不写入 `.env`、日志或
 Dashboard 状态接口。关闭或刷新浏览器页面不会停止已经启动的策略；只有停止或
 重启 Python/systemd 服务后才需要再次打开页面填写 Key。
+
+Windows 建议以前台方式运行。保持 PowerShell 窗口开启：
+
+```powershell
+cd F:\APP\Arena-Hero-Conservative
+.\.venv\Scripts\python.exe tactic.py
+```
+
+### 3. 停止与重启（Windows）
+
+前台运行时优先在原 PowerShell 窗口按 `Ctrl+C`。如果窗口已经丢失或曾重复启动，
+请使用管理员 PowerShell 清理所有监听 `8765` 的进程树。不要使用 `$pid` 变量名，
+因为 `$PID` 是 PowerShell 内置只读变量：
+
+```powershell
+$ownerPids = @(
+  Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique
+)
+$ownerPids | ForEach-Object { taskkill /PID $_ /T /F }
+
+Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue
+```
+
+最后一条命令没有输出才表示端口已经完全释放。然后重新执行启动命令；进程重启后
+内存中的 Key 会被清除，需要在 Dashboard 页面重新提交。
 
 策略默认连接生产 API，使用 SDK 自带的 WebSocket 重连和安全重试。当前生产目标是
 人口 30，即 Core 资源容量达到 `30 × 5 = 150` 后停止购买；人口未满时会在 Worker、
@@ -166,7 +198,7 @@ Invoke-RestMethod http://127.0.0.1:8765/api/state
 
 如果云服务器无法连接 GitHub，不需要在服务器执行 `git pull`：在本地按
 [`deploy/README.md`](deploy/README.md) 的“Offline update”流程打包源码并上传，服务器
-会在保留 `.venv`、API key 配置和 `/var/lib/arena-hero-conservative` 运行状态的前提下覆盖
+会在保留 `.venv`、运行配置和 `/var/lib/arena-hero-conservative` 状态的前提下覆盖
 应用代码。
 
 如果服务器可以连接 GitHub，标准同步流程是：

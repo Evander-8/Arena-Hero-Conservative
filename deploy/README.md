@@ -21,6 +21,19 @@ Beacon when safe.
 Do not run a second tactic process with the same Arena Hero account. All Agent
 clients share one plan slot, so another process can replace this service's plan.
 
+## 部署路径选择（先看）
+
+下文的“项目根目录”统一指 `/opt/arena-hero-conservative`，不是 `/root`，也不是
+登录后提示符所在的 `~`。只选择一种流程：
+
+- 全新服务器、没有旧项目：按第 1 到第 5 节执行。
+- 已有项目、服务器无法连接 GitHub：执行 **Offline update**。
+- 已有 Git 仓库、服务器可以连接 GitHub：执行 **Online Git update**。
+
+不要在已有部署上重复执行 `useradd`、`git clone` 或创建 `.venv`。无论选择哪种
+流程，Python/systemd 进程每次重启都会清除内存中的 Key；服务启动后要重新打开
+Dashboard 提交一次 Key。
+
 ## 1. Install prerequisites
 
 The server needs Git and Python 3.11 or newer. On Debian or Ubuntu:
@@ -64,11 +77,9 @@ sudo -u arena-hero \
   /opt/arena-hero-conservative/.venv/bin/python -m pip install \
   -r /opt/arena-hero-conservative/requirements.txt
 
-sudo -u arena-hero \
-  /opt/arena-hero-conservative/.venv/bin/python -m pip check
-sudo -u arena-hero \
-  /opt/arena-hero-conservative/.venv/bin/python -m unittest discover \
-  -s /opt/arena-hero-conservative/tests
+cd /opt/arena-hero-conservative
+sudo -u arena-hero .venv/bin/python -m pip check
+sudo -u arena-hero .venv/bin/python -m unittest discover -s tests
 ```
 
 ## 3. Configure runtime settings
@@ -101,6 +112,9 @@ sudo systemctl enable --now arena-hero.service
 sudo systemctl status arena-hero.service --no-pager
 ```
 
+At this point the service is expected to stay active with Dashboard status
+`awaiting-key`. Starting the service does not connect to Arena Hero by itself.
+
 Follow live logs with:
 
 ```bash
@@ -131,10 +145,11 @@ Keep TCP port `8765` closed to the public Internet. From the local computer,
 create an SSH tunnel:
 
 ```bash
-ssh -L 8765:127.0.0.1:8765 your-user@your-server
+ssh -L 18765:127.0.0.1:8765 your-user@your-server
 ```
 
-Then open `http://127.0.0.1:8765` locally.
+Then open `http://127.0.0.1:18765` locally. Using local port `18765` avoids a
+collision when a local development instance already uses `8765`.
 
 ### Optional Nginx access
 
@@ -153,8 +168,9 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-Replace `arena.example.com` before enabling the configuration. Add HTTPS before
-using the dashboard over an untrusted network.
+Replace `arena.example.com` before enabling the configuration. The `/api/key`
+request contains the API Key, so do not submit it through a public HTTP-only
+site. Basic Auth is access control, not encryption; add HTTPS first.
 
 For HTTPS with Certbot:
 
@@ -167,7 +183,7 @@ Keep Basic Auth enabled even after adding TLS.
 
 ## Update an existing deployment
 
-Use this section when the project, virtual environment, API key file, and
+Use this section when the project, virtual environment, runtime settings, and
 `arena-hero.service` already exist on the cloud server. Do not run the initial
 `useradd`, `git clone`, or `python3 -m venv` commands again.
 
@@ -192,21 +208,25 @@ tar --exclude=.git --exclude=.venv --exclude=__pycache__ `
 Upload the archive to the existing server with any available file-transfer
 method. `scp` is an example when SSH is reachable:
 
-```bash
-scp arena-hero-release-YYYYMMDD-HHMMSS.tar.gz \
-  your-user@your-server:/tmp/
+```powershell
+scp $release "your-user@your-server:/tmp/"
 ```
 
 The archive contains source, tests, requirements, and deployment templates. It
 does not contain `.git`, `.venv`, `.env`, API keys, logs, or persistent runtime
 state.
 
-On the server, first verify the archive and stop the old service:
+On the server, select the newest uploaded archive, print the exact path, verify
+it, and only then stop the old service. Do not type the literal placeholder
+`YYYYMMDD-HHMMSS` and do not add a trailing `~` to the filename:
 
 ```bash
-release=/tmp/arena-hero-release-YYYYMMDD-HHMMSS.tar.gz
+release=$(ls -1t /tmp/arena-hero-release-*.tar.gz 2>/dev/null | head -n 1)
+test -n "$release" && test -f "$release"
+printf 'release=%s\n' "$release"
 tar -tzf "$release" | head -40
 sudo systemctl stop arena-hero.service
+sudo systemctl is-active arena-hero.service || true
 ```
 
 Back up the existing code and persistent state before replacing anything:
@@ -222,7 +242,7 @@ sudo tar -C /var/lib -czf \
 ```
 
 Replace only the application source. This preserves the existing `.venv`, the
-server-side `.env` location, and `/var/lib/arena-hero-conservative`:
+systemd runtime settings, and `/var/lib/arena-hero-conservative`:
 
 ```bash
 backup=/opt/arena-hero-conservative.previous-$(date +%Y%m%d-%H%M%S)
@@ -277,6 +297,11 @@ sudo journalctl -u arena-hero.service -n 80 --no-pager
 curl --fail --silent http://127.0.0.1:8765/api/state | python3 -m json.tool | head -80
 ```
 
+The first state after every service restart should be `awaiting-key`. Reopen the
+Dashboard through the SSH tunnel or HTTPS reverse proxy and submit the Key
+again. Then repeat the state command and verify `runtime.status` is `connected`
+and `acceptedSubmissions` increases.
+
 Only after the new service is connected and submitting Ticks should you remove
 the previous checkout:
 
@@ -291,7 +316,14 @@ exploration map and operator statistics.
 The archive update is the preferred method when outbound GitHub access is
 blocked. It does not require changing the server firewall or proxy.
 
-### 1. Check the current service and revision
+An offline release archive intentionally excludes `.git`. After replacing an
+installation with this archive, continue using the offline archive procedure;
+the Git commands below apply only to deployments that still contain a valid
+`/opt/arena-hero-conservative/.git` checkout.
+
+### Online Git update when the server can reach GitHub
+
+#### 1. Check the current service and revision
 
 ```bash
 cd /opt/arena-hero-conservative
@@ -303,7 +335,7 @@ sudo -u arena-hero git status --short
 The working tree should be clean before pulling. Do not overwrite local changes
 on the server without reviewing them first.
 
-### 2. Stop the old tactic cleanly
+#### 2. Stop the old tactic cleanly
 
 ```bash
 sudo systemctl stop arena-hero.service
@@ -314,7 +346,7 @@ Stopping the service prevents two tactic processes from sharing the same Agent
 slot during the update. It does not reset the Arena Hero world or delete the
 persistent map/statistics.
 
-### 3. Back up persistent state and record the old revision
+#### 3. Back up persistent state and record the old revision
 
 ```bash
 cd /opt/arena-hero-conservative
@@ -325,7 +357,7 @@ sudo tar -C /var/lib -czf \
   arena-hero-conservative
 ```
 
-### 4. Pull the new version and synchronize dependencies
+#### 4. Pull the new version and synchronize dependencies
 
 ```bash
 sudo -u arena-hero git pull --ff-only
@@ -336,14 +368,14 @@ sudo -u arena-hero .venv/bin/python -m pip check
 The existing `.venv` is reused. `pip install -r` only changes packages required
 by the new version; it does not recreate the environment.
 
-### 5. Test before starting
+#### 5. Test before starting
 
 ```bash
 sudo -u arena-hero .venv/bin/python -m unittest discover -s tests
 sudo -u arena-hero .venv/bin/python -m py_compile tactic.py dashboard.py
 ```
 
-### 6. Start the updated service and verify it
+#### 6. Start the updated service and verify it
 
 ```bash
 sudo systemctl restart arena-hero.service
@@ -352,8 +384,9 @@ sudo journalctl -u arena-hero.service -n 80 --no-pager
 curl --fail --silent http://127.0.0.1:8765/api/state | python3 -m json.tool | head -80
 ```
 
-Check that `runtime.status` is `connected`, `acceptedSubmissions` increases,
-and there is only one process:
+After `restart`, submit the API Key again through the Dashboard. Until then,
+`runtime.status=awaiting-key` is correct. After submission, check that status is
+`connected`, `acceptedSubmissions` increases, and there is only one process:
 
 ```bash
 sudo systemctl is-active arena-hero.service
@@ -391,10 +424,11 @@ port. Inspect and stop the duplicate process, or change
 `ARENA_HERO_DASHBOARD_PORT` in the systemd environment file and update the SSH
 tunnel/Nginx upstream consistently.
 
-If `runtime.status` is `disconnected`, check DNS, outbound HTTPS, proxy
-environment variables, API key file permissions, and the service journal. Do
-not print the API key while debugging. If a proxy is configured, keep the
-`python-socks` dependency installed.
+If `runtime.status` is `awaiting-key`, open the Dashboard and submit the Key. If
+it is `error`, check DNS, outbound HTTPS, proxy environment variables, SDK
+compatibility, and the service journal. Do not print the API Key while
+debugging. If a proxy is configured, keep the `python-socks` dependency
+installed.
 
 If the Dashboard page loads but live updates stop behind Nginx, confirm the
 supplied Nginx configuration has buffering disabled and a long read timeout for
