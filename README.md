@@ -67,22 +67,36 @@ env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY \
 
 ## 运行
 
-通过环境变量提供 API key（不会写入代码或日志）：
+推荐在项目根目录创建 `.env`（已加入 `.gitignore`，不会提交到 Git）：
 
-```bash
-ARENA_HERO_API_KEY='your-api-key' python tactic.py
+```dotenv
+ARENA_HERO_API_KEY=your-api-key
 ```
 
-也可以直接运行后按提示输入 key：
+然后直接运行：
 
 ```bash
 python tactic.py
 ```
 
-策略默认连接生产 API，使用 SDK 自带的 WebSocket 重连和安全重试。它会将人口
-目标控制在 11：最多 8 个 Worker、1 个 Vanguard 和 2 个 Ranger。这是面向长期
-资源积累与低冲突生存的确定性策略；共享永久世界中的敌方行为不可预测，因此不把
-它描述为绝对最优。
+也可以通过环境变量提供 API key（不会写入代码或日志）：
+
+```bash
+ARENA_HERO_API_KEY='your-api-key' python tactic.py
+```
+
+没有配置 `.env` 或环境变量时，脚本会提示输入 key：
+
+```bash
+python tactic.py
+```
+
+策略默认连接生产 API，使用 SDK 自带的 WebSocket 重连和安全重试。当前生产目标是
+人口 30，即 Core 资源容量达到 `30 × 5 = 150` 后停止购买；人口未满时会在 Worker、
+Vanguard、Ranger 之间按防守缺口、经济需求和远征编队动态分配。每个编队保留 1 个
+Vanguard 和 1 个 Ranger 在 Core 附近巡逻，其余战斗单位远程探索、接敌、攻击可见敌方
+Core，并在低血量或威胁过多时撤回。共享永久世界中的敌方行为不可预测，因此不把它
+描述为绝对最优。
 
 ## 实时面板
 
@@ -113,7 +127,8 @@ Arena Hero 官网过去的探索历史保存在官网域名自己的 IndexedDB �
 进程无法自动读取。首次升级到此版本时，本地面板不能补回升级前只存在于官网的历史；
 从本版本开始，策略实际观察到的探索范围会在重启后持续保留。
 
-端口被占用时会依次尝试后续 9 个端口。也可以指定端口或关闭面板：
+Dashboard 使用固定端口，默认始终为 `8765`。端口被占用时程序会明确报错并
+终止启动，不会自动切换到其他端口。也可以显式指定另一个固定端口或关闭面板：
 
 ```bash
 ARENA_HERO_DASHBOARD_PORT=9000 python tactic.py
@@ -126,9 +141,14 @@ ARENA_HERO_DASHBOARD=0 python tactic.py
 环境文件、持久化状态目录、自动重启以及可选的 Nginx 密码保护配置。完整步骤见
 [`deploy/README.md`](deploy/README.md)。
 
-服务器部署建议保持 Dashboard 监听 `127.0.0.1`，通过 SSH 隧道访问，不要直接将
-`8765` 端口暴露到公网。可通过 `ARENA_HERO_STATE_DIR` 将地图和统计保存到独立目录；
-systemd 模板默认使用 `/var/lib/arena-hero-conservative`。
+如果云服务器无法连接 GitHub，不需要在服务器执行 `git pull`：在本地按
+[`deploy/README.md`](deploy/README.md) 的“Offline update”流程打包源码并上传，服务器
+会在保留 `.venv`、API key 配置和 `/var/lib/arena-hero-conservative` 运行状态的前提下覆盖
+应用代码。
+
+服务器部署建议保持 Dashboard 监听 `127.0.0.1`，通过 SSH 隧道或带 HTTPS/密码保护的
+Nginx 访问，不要直接将 `8765` 端口暴露到公网。可通过 `ARENA_HERO_STATE_DIR` 将地图
+和统计保存到独立目录；systemd 模板默认使用 `/var/lib/arena-hero-conservative`。
 
 ## 检查
 

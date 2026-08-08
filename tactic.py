@@ -14,6 +14,11 @@ from getpass import getpass
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # Allows offline unit tests before dependencies install.
+    load_dotenv = None  # type: ignore[assignment]
+
 from dashboard import (
     DashboardRuntime,
     OperatorStats,
@@ -23,8 +28,9 @@ from dashboard import (
 )
 
 try:
-    from arena_hero import ArenaHeroClient, Direction, UnitType, unit_cost
+    from arena_hero import APIError, ArenaHeroClient, Direction, UnitType, unit_cost
 except ModuleNotFoundError:  # Allows offline unit tests before dependencies install.
+    APIError = None  # type: ignore[assignment,misc]
     ArenaHeroClient = None  # type: ignore[assignment,misc]
     Direction = None  # type: ignore[assignment,misc]
     UnitType = None  # type: ignore[assignment,misc]
@@ -35,16 +41,19 @@ MAX_CORE_HP = 5
 MAX_WORKER_HP = 2
 MAX_VANGUARD_HP = 4
 MAX_RANGER_HP = 2
-COMBAT_THREAT_RADIUS = 3
+COMBAT_THREAT_RADIUS = 5
 WORKER_THREAT_RADIUS = 2
 RESOURCE_RESERVE = 5
 BOOTSTRAP_WORKER_TARGET = 4
-WORKER_TARGET = 6
-FINAL_WORKER_TARGET = 8
-VANGUARD_TARGET = 1
+WORKER_TARGET = 14
+FINAL_WORKER_TARGET = 14
+VANGUARD_TARGET = 2
 RANGER_TARGET = 2
-POPULATION_TARGET = 11
+# Official Core storage is max(10, population * 5); 30 Units provide 150 slots.
+POPULATION_TARGET = 30
 CORE_ALERT_TICKS = 8
+CORE_GUARD_RADIUS = 2
+CORE_VISION_RADIUS = 5
 RESOURCE_MEMORY_RADIUS = 36
 RESOURCE_SCOUT_RADII = (12, 19, 26, 32, 26, 19)
 RESOURCE_SCOUT_WAYPOINT_STEP = 7
@@ -193,23 +202,49 @@ def _direction_for_step(
     return None
 
 
-def _move_toward(unit: Any, target: tuple[int, int], obstacles: set[tuple[int, int]]) -> bool:
+def _queue_move(
+    unit: Any,
+    direction: Any,
+    reserved: set[Position] | None = None,
+) -> bool:
     source = _position(unit)
-    destination = _first_path_step(source, target, obstacles)
+    dx, dy = _delta(direction)
+    destination = (source[0] + dx, source[1] + dy)
+    if reserved is not None and destination in reserved:
+        return False
+    unit.move(direction)
+    if reserved is not None:
+        reserved.add(destination)
+    return True
+
+
+def _move_toward(
+    unit: Any,
+    target: tuple[int, int],
+    obstacles: set[tuple[int, int]],
+    reserved: set[Position] | None = None,
+) -> bool:
+    source = _position(unit)
+    active_obstacles = obstacles | (reserved or set())
+    destination = _first_path_step(source, target, active_obstacles)
     direction = (
         _direction_between(source, destination)
         if destination is not None and destination != source
         else None
     )
     if direction is None:
-        direction = _direction_for_step(source, target, obstacles)
+        direction = _direction_for_step(source, target, active_obstacles)
     if direction is None:
         return False
-    unit.move(direction)
-    return True
+    return _queue_move(unit, direction, reserved)
 
 
-def _explore(unit: Any, turn: Any, obstacles: set[tuple[int, int]]) -> bool:
+def _explore(
+    unit: Any,
+    turn: Any,
+    obstacles: set[tuple[int, int]],
+    reserved: set[Position] | None = None,
+) -> bool:
     """Take a deterministic low-commitment step when no resource is visible."""
 
     directions = _directions()
@@ -221,9 +256,10 @@ def _explore(unit: Any, turn: Any, obstacles: set[tuple[int, int]]) -> bool:
         direction = directions[(seed + phase + offset) % len(directions)]
         dx, dy = _delta(direction)
         destination = (_position(unit)[0] + dx, _position(unit)[1] + dy)
-        if destination not in obstacles:
-            unit.move(direction)
-            return True
+        if destination not in obstacles and (
+            reserved is None or destination not in reserved
+        ):
+            return _queue_move(unit, direction, reserved)
     return False
 
 
@@ -313,6 +349,7 @@ def _move_away(
     obstacles: set[Position],
     core_position: Position | None,
     core_alert: bool,
+    reserved: set[Position] | None = None,
 ) -> bool:
     origin = _position(unit)
     threat_positions = tuple(_position(threat) for threat in threats)
@@ -320,7 +357,9 @@ def _move_away(
     for order, direction in enumerate(_directions()):
         dx, dy = _delta(direction)
         destination = (origin[0] + dx, origin[1] + dy)
-        if destination in obstacles:
+        if destination in obstacles or (
+            reserved is not None and destination in reserved
+        ):
             continue
         nearest_threat = min(
             (_manhattan(destination, position) for position in threat_positions),
@@ -333,8 +372,11 @@ def _move_away(
         candidates.append(((nearest_threat, core_score, -order), direction))
     if not candidates:
         return False
-    unit.move(max(candidates, key=lambda item: item[0])[1])
-    return True
+    return _queue_move(
+        unit,
+        max(candidates, key=lambda item: item[0])[1],
+        reserved,
+    )
 
 
 def _supercover_line(start: Position, target: Position) -> tuple[Position, ...]:
@@ -772,15 +814,280 @@ def _guard_goal(
     radius: int,
     blocked: set[Position],
     claimed: set[Position],
+    phase: int = 0,
 ) -> Position:
     candidates = _guard_candidates(core, radius)
-    seed = sum(ord(char) for char in _object_key(unit))
+    seed = sum(ord(char) for char in _object_key(unit)) + phase
     ordered = candidates[seed % len(candidates) :] + candidates[: seed % len(candidates)]
     for candidate in ordered:
         if candidate not in blocked and candidate not in claimed:
             claimed.add(candidate)
             return candidate
-    return core
+    return _position(unit)
+
+
+def _patrol_step(
+    unit: Any,
+    core: Position,
+    radius: int,
+    obstacles: set[Position],
+    phase: int = 0,
+    reserved: set[Position] | None = None,
+) -> bool:
+    """Keep a combat unit moving around a local ring when no enemy is visible."""
+
+    origin = _position(unit)
+    candidates = _guard_candidates(core, radius)
+    if not candidates:
+        return False
+    seed = sum(ord(char) for char in _object_key(unit)) + phase
+    ordered = candidates[seed % len(candidates) :] + candidates[: seed % len(candidates)]
+    if origin in candidates:
+        index = candidates.index(origin)
+        ordered = candidates[index + 1 :] + candidates[: index + 1]
+    for candidate in ordered:
+        if candidate == origin or candidate in obstacles:
+            continue
+        if _move_toward(unit, candidate, obstacles, reserved):
+            return True
+    # A blocked ring should still produce a legal in-range step when possible.
+    for direction in _directions():
+        dx, dy = _delta(direction)
+        destination = (origin[0] + dx, origin[1] + dy)
+        if (
+            destination in obstacles
+            or (reserved is not None and destination in reserved)
+            or _manhattan(destination, core) > radius + 1
+        ):
+            continue
+        return _queue_move(unit, direction, reserved)
+    return False
+
+
+def _combat_units(turn: Any) -> tuple[Any, ...]:
+    return tuple(sorted((*turn.vanguards, *turn.rangers), key=_object_key))
+
+
+def _core_visible_enemies(turn: Any, obstacles: set[Position]) -> list[Any]:
+    """Return hostile units inside the Core's five-cell vision envelope."""
+
+    if turn.core is None:
+        return []
+    core_position = _position(turn.core)
+    return sorted(
+        (
+            enemy
+            for enemy in turn.visible_enemies
+            if not _is_enemy_core(enemy)
+            and _visible_from(core_position, _position(enemy), CORE_VISION_RADIUS, obstacles)
+        ),
+        key=lambda enemy: (
+            _manhattan(_position(enemy), core_position),
+            int(getattr(enemy, "hp", 0)),
+            _object_key(enemy),
+        ),
+    )
+
+
+def _assign_targets(units: tuple[Any, ...], enemies: list[Any]) -> dict[str, Any]:
+    """Spread multiple enemies across a group while keeping one target shared."""
+
+    if not units or not enemies:
+        return {}
+    assignments: dict[str, Any] = {}
+    for index, unit in enumerate(units):
+        assignments[_object_key(unit)] = enemies[index % len(enemies)]
+    return assignments
+
+
+def _group_visible_enemies(
+    turn: Any,
+    units: tuple[Any, ...],
+    obstacles: set[Position],
+    *,
+    shared_vision: bool = False,
+    include_cores: bool = False,
+) -> list[Any]:
+    if not units:
+        return []
+    seen: dict[str, Any] = {
+        _object_key(enemy): enemy
+        for enemy in turn.visible_enemies
+        if (include_cores or not _is_enemy_core(enemy))
+        and (
+            shared_vision
+            or any(
+                _visible_from(
+                    _position(unit),
+                    _position(enemy),
+                    4 if _unit_type_value(unit) == "VANGUARD" else 5,
+                    obstacles,
+                )
+                for unit in units
+            )
+        )
+    }
+    return sorted(
+        seen.values(),
+        key=lambda enemy: (
+            min(_manhattan(_position(unit), _position(enemy)) for unit in units),
+            int(getattr(enemy, "hp", 0)),
+            _object_key(enemy),
+        ),
+    )
+
+
+def _expedition_goal(
+    core: Position,
+    unit: Any,
+    phase: int = 0,
+    *,
+    far: bool = False,
+) -> Position:
+    """Select a deterministic world-exploration waypoint for an expedition unit."""
+
+    radii = RESOURCE_SCOUT_RADII
+    radius_index = (len(radii) - 1 if far else 0) + phase
+    seed = sum(ord(char) for char in _object_key(unit)) + radius_index
+    radius = radii[radius_index % len(radii)]
+    route = _square_ring_waypoints(core, radius)
+    return route[seed % len(route)] if route else core
+
+
+def _unit_max_hp(unit: Any) -> int:
+    maximum = {
+        "VANGUARD": MAX_VANGUARD_HP,
+        "RANGER": MAX_RANGER_HP,
+    }.get(_unit_type_value(unit))
+    if maximum is not None:
+        return maximum
+    return int(getattr(unit, "hp", MAX_VANGUARD_HP))
+
+
+def _unit_injured(unit: Any) -> bool:
+    return int(getattr(unit, "hp", _unit_max_hp(unit))) < _unit_max_hp(unit)
+
+
+def _recovery_candidate(units: Iterable[Any], core: Any) -> Any | None:
+    core_position = _position(core)
+    injured = tuple(unit for unit in units if _unit_injured(unit))
+    if not injured:
+        return None
+    return min(
+        injured,
+        key=lambda unit: (
+            0 if _position(unit) == core_position else 1,
+            int(getattr(unit, "hp", 0)) / _unit_max_hp(unit),
+            _manhattan(_position(unit), core_position),
+            _object_key(unit),
+        ),
+    )
+
+
+def _recovery_staging_goal(
+    unit: Any,
+    core: Position,
+    blocked: set[Position],
+    claimed: set[Position],
+    phase: int,
+    occupancy: dict[Position, int] | None = None,
+) -> Position:
+    origin = _position(unit)
+    if (
+        1 <= _manhattan(origin, core) <= 2
+        and origin not in claimed
+        and (occupancy is None or occupancy.get(origin, 0) <= 1)
+    ):
+        claimed.add(origin)
+        return origin
+
+    candidates = _guard_candidates(core, 1) + _guard_candidates(core, 2)
+    seed = sum(ord(char) for char in _object_key(unit)) + phase
+    ordered = candidates[seed % len(candidates) :] + candidates[: seed % len(candidates)]
+    for candidate in ordered:
+        if candidate not in blocked and candidate not in claimed:
+            claimed.add(candidate)
+            return candidate
+    return origin
+
+
+def _queue_combat_action(
+    unit: Any,
+    target: Any | None,
+    terrain_obstacles: set[Position],
+    movement_obstacles: set[Position],
+    core: Any | None,
+    guard_goal: Position,
+    retreat: bool,
+    combat_type: str,
+    patrol_phase: int = 0,
+    reserved: set[Position] | None = None,
+) -> bool:
+    position = _position(unit)
+    if retreat:
+        if position != guard_goal:
+            return _move_toward(
+                unit,
+                guard_goal,
+                movement_obstacles,
+                reserved,
+            )
+        return False
+    if target is not None:
+        enemy_position = _position(target)
+        if combat_type == "VANGUARD" and _manhattan(position, enemy_position) == 1:
+            direction = _direction_between(position, enemy_position)
+            if direction is not None:
+                unit.sweep(direction)
+                return False
+        if combat_type == "RANGER" and _aligned_shot(
+            position,
+            enemy_position,
+            terrain_obstacles,
+        ):
+            unit.shoot(target)
+            return False
+        if combat_type == "VANGUARD":
+            attack_goals = tuple(
+                (enemy_position[0] + dx, enemy_position[1] + dy)
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            )
+        else:
+            attack_goals = tuple(
+                candidate
+                for candidate in (
+                    (enemy_position[0] - 1, enemy_position[1]),
+                    (enemy_position[0] + 1, enemy_position[1]),
+                    (enemy_position[0], enemy_position[1] - 1),
+                    (enemy_position[0], enemy_position[1] + 1),
+                    (enemy_position[0] - 2, enemy_position[1]),
+                    (enemy_position[0] + 2, enemy_position[1]),
+                    (enemy_position[0], enemy_position[1] - 2),
+                    (enemy_position[0], enemy_position[1] + 2),
+                )
+                if _aligned_shot(candidate, enemy_position, terrain_obstacles)
+            )
+        for attack_goal in attack_goals:
+            if attack_goal not in movement_obstacles and _move_toward(
+                unit,
+                attack_goal,
+                movement_obstacles,
+                reserved,
+            ):
+                return True
+    if core is not None and position != guard_goal:
+        if _move_toward(unit, guard_goal, movement_obstacles, reserved):
+            return True
+    if core is not None:
+        return _patrol_step(
+            unit,
+            _position(core),
+            max(1, _manhattan(_position(core), guard_goal)),
+            movement_obstacles,
+            patrol_phase,
+            reserved,
+        )
+    return False
 
 
 def _queue_worker_action(
@@ -792,12 +1099,14 @@ def _queue_worker_action(
     worker_index: int,
     worker_count: int,
     core_alert: bool,
+    reserved: set[Position] | None = None,
 ) -> bool:
     core = turn.core
     worker_position = _position(worker)
 
     if (
         getattr(worker, "hp", MAX_WORKER_HP) < MAX_WORKER_HP
+        and turn.resources > 0
         and core is not None
         and _core_is_stationary(core)
         and _same_cell(worker, core)
@@ -816,6 +1125,7 @@ def _queue_worker_action(
             obstacles,
             _position(core) if core is not None else None,
             core_alert,
+            reserved,
         )
 
     cargo = int(getattr(worker, "cargo", 0) or 0)
@@ -830,9 +1140,9 @@ def _queue_worker_action(
             return False
         elif core is not None and _same_cell(worker, core):
             # A full Core cannot spawn while a Worker occupies its second slot.
-            return _explore(worker, turn, obstacles)
+            return _explore(worker, turn, obstacles, reserved)
         elif core is not None:
-            return _move_toward(worker, _position(core), obstacles)
+            return _move_toward(worker, _position(core), obstacles, reserved)
         return False
 
     if worker_position in turn.resource_cells and assigned_resource == worker_position:
@@ -840,7 +1150,7 @@ def _queue_worker_action(
         return False
 
     if assigned_resource is not None:
-        if _move_toward(worker, assigned_resource, obstacles):
+        if _move_toward(worker, assigned_resource, obstacles, reserved):
             return True
         memory.resource_targets.pop(_object_key(worker), None)
 
@@ -853,23 +1163,27 @@ def _queue_worker_action(
         )
         previous = memory.previous_positions.get(_object_key(worker))
         scout_obstacles = obstacles | ({previous} if previous is not None else set())
-        if _move_toward(worker, scout_goal, scout_obstacles):
+        if _move_toward(worker, scout_goal, scout_obstacles, reserved):
             return True
-        return _move_toward(worker, scout_goal, obstacles)
+        return _move_toward(worker, scout_goal, obstacles, reserved)
     return False
 
 
 def _queue_vanguard_action(
     turn: Any,
     vanguard: Any,
-    obstacles: set[Position],
+    terrain_obstacles: set[Position],
+    movement_obstacles: set[Position],
     guard_goal: Position,
-    core_alert: bool,
+    target: Any | None = None,
+    retreat: bool = False,
+    patrol_phase: int = 0,
+    reserved: set[Position] | None = None,
 ) -> bool:
     core = turn.core
-    position = _position(vanguard)
     if (
         getattr(vanguard, "hp", MAX_VANGUARD_HP) < MAX_VANGUARD_HP
+        and turn.resources > 0
         and core is not None
         and _core_is_stationary(core)
         and _same_cell(vanguard, core)
@@ -878,37 +1192,35 @@ def _queue_vanguard_action(
         return False
     if _queue_beacon_pickup(turn, vanguard):
         return False
-
-    threats = _visible_threats(turn, position, COMBAT_THREAT_RADIUS)
-    adjacent = [
-        enemy
-        for enemy in threats
-        if _manhattan(_position(enemy), position) == 1
-        and _unit_type_value(enemy) != "WORKER"
-    ]
-    if adjacent:
-        direction = _direction_for_step(position, _position(adjacent[0]), obstacles)
-        if direction is not None:
-            vanguard.sweep(direction)
-        return False
-    if core_alert and threats:
-        return _move_toward(vanguard, _position(threats[0]), obstacles)
-    if core is not None and position != guard_goal:
-        return _move_toward(vanguard, guard_goal, obstacles)
-    return False
+    return _queue_combat_action(
+        vanguard,
+        target,
+        terrain_obstacles,
+        movement_obstacles,
+        core,
+        guard_goal,
+        retreat,
+        "VANGUARD",
+        patrol_phase,
+        reserved,
+    )
 
 
 def _queue_ranger_action(
     turn: Any,
     ranger: Any,
-    obstacles: set[Position],
+    terrain_obstacles: set[Position],
+    movement_obstacles: set[Position],
     guard_goal: Position,
-    core_alert: bool,
+    target: Any | None = None,
+    retreat: bool = False,
+    patrol_phase: int = 0,
+    reserved: set[Position] | None = None,
 ) -> bool:
     core = turn.core
-    position = _position(ranger)
     if (
         getattr(ranger, "hp", MAX_RANGER_HP) < MAX_RANGER_HP
+        and turn.resources > 0
         and core is not None
         and _core_is_stationary(core)
         and _same_cell(ranger, core)
@@ -917,70 +1229,66 @@ def _queue_ranger_action(
         return False
     if _queue_beacon_pickup(turn, ranger):
         return False
-
-    # A diagonal range-3 shot is Manhattan distance 6, so use all currently
-    # visible enemies for Ranger target selection rather than a radius filter.
-    threats = sorted(
-        turn.visible_enemies,
-        key=lambda enemy: (
-            _manhattan(_position(enemy), position),
-            int(getattr(enemy, "hp", 0)),
-            str(getattr(enemy, "id", "")),
-        ),
+    return _queue_combat_action(
+        ranger,
+        target,
+        terrain_obstacles,
+        movement_obstacles,
+        core,
+        guard_goal,
+        retreat,
+        "RANGER",
+        patrol_phase,
+        reserved,
     )
-    for enemy in threats:
-        if not _aligned_shot(position, _position(enemy), obstacles):
-            continue
-        enemy_type = _unit_type_value(enemy)
-        threatens_ranger = _can_attack_cell_now(enemy, position, obstacles)
-        threatens_core = (
-            core is not None
-            and _can_attack_cell_now(enemy, _position(core), obstacles)
-        )
-        if enemy_type != "WORKER" and (core_alert or threatens_ranger or threatens_core):
-            ranger.shoot(enemy)
-            return False
-    if core is not None and position != guard_goal:
-        return _move_toward(ranger, guard_goal, obstacles)
-    return False
 
 
 def _spawn_choice(turn: Any, core_alert: bool) -> Any:
     if UnitType is None:
         return None
-    if core_alert:
-        defensive_choice = None
-        if len(turn.vanguards) < VANGUARD_TARGET:
-            defensive_choice = UnitType.VANGUARD
-        elif len(turn.rangers) < RANGER_TARGET:
-            defensive_choice = UnitType.RANGER
-        if defensive_choice is not None:
-            cost = (
-                unit_cost(defensive_choice, turn.state.population)
-                if unit_cost is not None
-                else 0
-            )
-            if turn.resources >= cost + 2:
-                return defensive_choice
-            if len(turn.workers) >= BOOTSTRAP_WORKER_TARGET:
-                return defensive_choice
-    if len(turn.workers) < BOOTSTRAP_WORKER_TARGET:
+    population = int(getattr(turn.state, "population", len(turn.units)))
+    if population >= POPULATION_TARGET:
+        return None
+
+    # Keep one Vanguard and one Ranger at the Core, then grow a mixed
+    # expedition fleet. During an alert, restore the missing defensive type
+    # before adding economy units.
+    workers = len(turn.workers)
+    if workers < BOOTSTRAP_WORKER_TARGET:
         return UnitType.WORKER
-    if len(turn.vanguards) < VANGUARD_TARGET:
+    missing_vanguard = max(0, VANGUARD_TARGET - len(turn.vanguards))
+    missing_ranger = max(0, RANGER_TARGET - len(turn.rangers))
+    if core_alert and missing_vanguard:
         return UnitType.VANGUARD
-    if len(turn.workers) < WORKER_TARGET:
-        return UnitType.WORKER
-    if len(turn.rangers) < RANGER_TARGET:
-        if len(turn.rangers) == 0:
-            return UnitType.RANGER
-    if len(turn.workers) < FINAL_WORKER_TARGET:
-        return UnitType.WORKER
-    if len(turn.rangers) < RANGER_TARGET:
+    if core_alert and missing_ranger:
         return UnitType.RANGER
-    return None
+    if missing_vanguard:
+        return UnitType.VANGUARD
+    if missing_ranger:
+        return UnitType.RANGER
+
+    combat = len(turn.vanguards) + len(turn.rangers)
+    # Build enough workers to sustain the economy, then alternate combat types
+    # so each new pair can form a Vanguard/Ranger expedition team.
+    desired_workers = min(WORKER_TARGET, max(BOOTSTRAP_WORKER_TARGET, population // 2))
+    if workers < desired_workers and workers <= combat + 4:
+        return UnitType.WORKER
+    if len(turn.rangers) <= len(turn.vanguards):
+        return UnitType.RANGER
+    if workers < FINAL_WORKER_TARGET:
+        return UnitType.WORKER
+    return UnitType.VANGUARD
 
 
 def _production_reserve(turn: Any, choice: Any, core_alert: bool) -> int:
+    if choice in {
+        getattr(UnitType, "VANGUARD", None),
+        getattr(UnitType, "RANGER", None),
+    } and (
+        len(turn.vanguards) < VANGUARD_TARGET
+        or len(turn.rangers) < RANGER_TARGET
+    ):
+        return 0
     if choice == getattr(UnitType, "WORKER", None) and len(turn.workers) < BOOTSTRAP_WORKER_TARGET:
         return 0
     if core_alert:
@@ -1043,69 +1351,289 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
             int(getattr(turn, "tick", 0)) + CORE_ALERT_TICKS,
         )
     core_alert = memory.core_alerted(int(getattr(turn, "tick", 0)))
-    worker_obstacles = terrain_obstacles | {
-        _position(enemy) for enemy in turn.visible_enemies
+    core_position = _position(turn.core)
+    patrol_phase = int(getattr(turn, "tick", 0)) // 2
+    traffic_obstacles = (
+        terrain_obstacles
+        | {_position(enemy) for enemy in turn.visible_enemies}
+    )
+    friendly_positions = {_position(unit) for unit in turn.units}
+    occupancy: dict[Position, int] = {}
+    for unit in turn.units:
+        position = _position(unit)
+        occupancy[position] = occupancy.get(position, 0) + 1
+    reserved_destinations: set[Position] = set()
+    departing_core_ids: set[str] = set()
+
+    sorted_vanguards = tuple(sorted(turn.vanguards, key=_object_key))
+    sorted_rangers = tuple(sorted(turn.rangers, key=_object_key))
+    guard_vanguards = sorted_vanguards[:1]
+    expedition_vanguards = sorted_vanguards[1:]
+    guard_rangers = sorted_rangers[:1]
+    expedition_rangers = sorted_rangers[1:]
+    guard_units = guard_vanguards + guard_rangers
+    expedition_units = expedition_vanguards + expedition_rangers
+    combat_units = guard_units + expedition_units
+    injured_ids = {
+        _object_key(unit) for unit in combat_units if _unit_injured(unit)
     }
+    recovery_unit = (
+        _recovery_candidate(combat_units, turn.core)
+        if _core_is_stationary(turn.core)
+        else None
+    )
+    recovery_id = _object_key(recovery_unit) if recovery_unit is not None else None
+
+    guard_blocked = (
+        traffic_obstacles
+        | {tuple(position) for position in turn.resource_cells}
+        | friendly_positions
+    )
+    claimed_guard_cells: set[Position] = set()
+
+    # Give the most urgent injury first access to the one Unit slot on the Core.
+    # Other injuries wait on separate nearby cells instead of forming a traffic jam.
+    if recovery_unit is not None:
+        core_blockers = tuple(
+            unit
+            for unit in turn.units
+            if _position(unit) == core_position
+            and _object_key(unit) != recovery_id
+        )
+        can_use_healing_slot = turn.resources > 0 and not core_blockers
+        recovery_goal = (
+            core_position
+            if can_use_healing_slot
+            else _recovery_staging_goal(
+                recovery_unit,
+                core_position,
+                guard_blocked | reserved_destinations,
+                claimed_guard_cells,
+                patrol_phase,
+                occupancy,
+            )
+        )
+        queue_recovery = (
+            _queue_vanguard_action
+            if _unit_type_value(recovery_unit) == "VANGUARD"
+            else _queue_ranger_action
+        )
+        moved = queue_recovery(
+            turn,
+            recovery_unit,
+            terrain_obstacles,
+            traffic_obstacles,
+            recovery_goal,
+            None,
+            True,
+            patrol_phase,
+            reserved_destinations,
+        )
+        if moved and _position(recovery_unit) == core_position:
+            departing_core_ids.add(recovery_id)
+
     assignments = memory.assign_resources(turn.workers)
     workers = tuple(sorted(turn.workers, key=_object_key))
-    core_position = _position(turn.core)
-    departing_core_ids: set[str] = set()
     for worker_index, worker in enumerate(workers):
         moved = _queue_worker_action(
             turn,
             worker,
-            worker_obstacles,
+            traffic_obstacles,
             memory,
             assignments.get(_object_key(worker)),
             worker_index,
             len(workers),
             core_alert,
+            reserved_destinations,
         )
         if moved and _position(worker) == core_position:
             departing_core_ids.add(_object_key(worker))
 
-    guard_blocked = (
-        terrain_obstacles
-        | {tuple(position) for position in turn.resource_cells}
-        | {_position(enemy) for enemy in turn.visible_enemies}
+    active_guards = tuple(
+        unit for unit in guard_units if _object_key(unit) not in injured_ids
     )
-    claimed_guard_cells: set[Position] = set()
-    for vanguard in sorted(turn.vanguards, key=_object_key):
-        goal = _guard_goal(
-            vanguard,
-            core_position,
-            1,
-            guard_blocked,
-            claimed_guard_cells,
+    active_expedition = tuple(
+        unit for unit in expedition_units if _object_key(unit) not in injured_ids
+    )
+    guard_enemies = _core_visible_enemies(turn, terrain_obstacles)
+    if not guard_enemies:
+        guard_enemies = _group_visible_enemies(turn, active_guards, terrain_obstacles)
+    expedition_enemies = _group_visible_enemies(
+        turn,
+        active_expedition,
+        terrain_obstacles,
+        include_cores=True,
+    )
+    guard_targets = _assign_targets(active_guards, guard_enemies)
+    expedition_targets = _assign_targets(active_expedition, expedition_enemies)
+    expedition_retreat = bool(active_expedition) and (
+        len(expedition_enemies) > len(active_expedition) and core_alert
+    )
+    for vanguard in guard_vanguards:
+        unit_id = _object_key(vanguard)
+        if unit_id == recovery_id:
+            continue
+        injured = unit_id in injured_ids
+        goal = (
+            _recovery_staging_goal(
+                vanguard,
+                core_position,
+                guard_blocked | reserved_destinations,
+                claimed_guard_cells,
+                patrol_phase,
+                occupancy,
+            )
+            if injured
+            else _guard_goal(
+                vanguard,
+                core_position,
+                CORE_GUARD_RADIUS,
+                guard_blocked | reserved_destinations,
+                claimed_guard_cells,
+                patrol_phase,
+            )
         )
         moved = _queue_vanguard_action(
             turn,
             vanguard,
             terrain_obstacles,
+            traffic_obstacles,
             goal,
-            core_alert,
+            None if injured else guard_targets.get(unit_id),
+            injured,
+            patrol_phase,
+            reserved_destinations,
         )
         if moved and _position(vanguard) == core_position:
-            departing_core_ids.add(_object_key(vanguard))
+            departing_core_ids.add(unit_id)
 
-    for ranger_index, ranger in enumerate(sorted(turn.rangers, key=_object_key)):
-        radius = 2 if core_alert or ranger_index == 0 else 5
-        goal = _guard_goal(
-            ranger,
-            core_position,
-            radius,
-            guard_blocked,
-            claimed_guard_cells,
+    for ranger in guard_rangers:
+        unit_id = _object_key(ranger)
+        if unit_id == recovery_id:
+            continue
+        injured = unit_id in injured_ids
+        goal = (
+            _recovery_staging_goal(
+                ranger,
+                core_position,
+                guard_blocked | reserved_destinations,
+                claimed_guard_cells,
+                patrol_phase,
+            )
+            if injured
+            else _guard_goal(
+                ranger,
+                core_position,
+                CORE_GUARD_RADIUS,
+                guard_blocked | reserved_destinations,
+                claimed_guard_cells,
+                patrol_phase,
+            )
         )
         moved = _queue_ranger_action(
             turn,
             ranger,
             terrain_obstacles,
+            traffic_obstacles,
             goal,
-            core_alert,
+            None if injured else guard_targets.get(unit_id),
+            injured,
+            patrol_phase,
+            reserved_destinations,
         )
         if moved and _position(ranger) == core_position:
-            departing_core_ids.add(_object_key(ranger))
+            departing_core_ids.add(unit_id)
+
+    expedition_claimed: set[Position] = set(claimed_guard_cells)
+    for unit in expedition_vanguards:
+        unit_id = _object_key(unit)
+        if unit_id == recovery_id:
+            continue
+        injured = unit_id in injured_ids
+        retreat = injured or expedition_retreat
+        if injured:
+            expedition_goal = _recovery_staging_goal(
+                unit,
+                core_position,
+                guard_blocked | reserved_destinations,
+                expedition_claimed,
+                patrol_phase,
+                occupancy,
+            )
+        elif expedition_retreat:
+            expedition_goal = _guard_goal(
+                unit,
+                core_position,
+                CORE_GUARD_RADIUS + 1,
+                guard_blocked | reserved_destinations,
+                expedition_claimed,
+                patrol_phase,
+                occupancy,
+            )
+        else:
+            expedition_goal = _expedition_goal(
+                core_position,
+                unit,
+                patrol_phase,
+                far=True,
+            )
+        moved = _queue_vanguard_action(
+            turn,
+            unit,
+            terrain_obstacles,
+            traffic_obstacles,
+            expedition_goal,
+            None if retreat else expedition_targets.get(unit_id),
+            retreat,
+            patrol_phase,
+            reserved_destinations,
+        )
+        if moved and _position(unit) == core_position:
+            departing_core_ids.add(unit_id)
+
+    for unit in expedition_rangers:
+        unit_id = _object_key(unit)
+        if unit_id == recovery_id:
+            continue
+        injured = unit_id in injured_ids
+        retreat = injured or expedition_retreat
+        if injured:
+            expedition_goal = _recovery_staging_goal(
+                unit,
+                core_position,
+                guard_blocked | reserved_destinations,
+                expedition_claimed,
+                patrol_phase,
+            )
+        elif expedition_retreat:
+            expedition_goal = _guard_goal(
+                unit,
+                core_position,
+                CORE_GUARD_RADIUS + 1,
+                guard_blocked | reserved_destinations,
+                expedition_claimed,
+                patrol_phase,
+            )
+        else:
+            expedition_goal = _expedition_goal(
+                core_position,
+                unit,
+                patrol_phase,
+                far=True,
+            )
+        moved = _queue_ranger_action(
+            turn,
+            unit,
+            terrain_obstacles,
+            traffic_obstacles,
+            expedition_goal,
+            None if retreat else expedition_targets.get(unit_id),
+            retreat,
+            patrol_phase,
+            reserved_destinations,
+        )
+        if moved and _position(unit) == core_position:
+            departing_core_ids.add(unit_id)
 
     _queue_core_action(
         turn,
@@ -1123,6 +1651,19 @@ def _state_directory() -> Path:
     )
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def _start_configured_dashboard(runtime: DashboardRuntime) -> Any:
+    port = int(os.environ.get("ARENA_HERO_DASHBOARD_PORT", "8765"))
+    try:
+        server, _ = start_dashboard(runtime, port=port)
+    except OSError as exc:
+        raise SystemExit(
+            f"Dashboard port {port} is unavailable. Stop the process using it "
+            "or set ARENA_HERO_DASHBOARD_PORT to another fixed port."
+        ) from exc
+    print(f"dashboard=http://127.0.0.1:{server.server_port}")
+    return server
 
 
 def play(api_key: str) -> None:
@@ -1150,16 +1691,7 @@ def play(api_key: str) -> None:
         "off",
     }
     if dashboard_enabled:
-        requested_port = int(os.environ.get("ARENA_HERO_DASHBOARD_PORT", "8765"))
-        for port in range(requested_port, requested_port + 10):
-            try:
-                dashboard_server, _ = start_dashboard(runtime, port=port)
-                print(f"dashboard=http://127.0.0.1:{dashboard_server.server_port}")
-                break
-            except OSError:
-                continue
-        if dashboard_server is None:
-            print("dashboard unavailable: ports are already in use; tactic will continue")
+        dashboard_server = _start_configured_dashboard(runtime)
 
     try:
         with ArenaHeroClient(api_key=api_key) as game:
@@ -1175,7 +1707,14 @@ def play(api_key: str) -> None:
                 except OSError:
                     pass
                 runtime.publish(build_snapshot(turn, MEMORY, operator_stats))
-                accepted = turn.submit()
+                try:
+                    accepted = turn.submit()
+                except APIError as exc:
+                    if exc.status_code == 409 and exc.error == "TICK_MISMATCH":
+                        runtime.record_submission(False)
+                        print(f"tick={turn.tick} skipped=TICK_MISMATCH")
+                        continue
+                    raise
                 runtime.record_submission(bool(accepted.accepted))
                 print(f"tick={accepted.tick} accepted={accepted.accepted}")
     except KeyboardInterrupt:
@@ -1190,11 +1729,59 @@ def play(api_key: str) -> None:
             dashboard_server.server_close()
 
 
-def main() -> None:
-    api_key = os.environ.get("ARENA_HERO_API_KEY") or getpass("Arena Hero API key: ")
+def _api_key_validation_error(api_key: str) -> str | None:
     if not api_key:
-        raise SystemExit("ARENA_HERO_API_KEY is required.")
-    play(api_key)
+        return "Arena Hero API key is required."
+
+    invalid = [
+        (index, ord(character))
+        for index, character in enumerate(api_key, start=1)
+        if ord(character) < 0x21 or ord(character) > 0x7E
+    ]
+    if not invalid:
+        return None
+
+    details = ", ".join(
+        f"position {position}=U+{code_point:04X}"
+        for position, code_point in invalid[:8]
+    )
+    if len(invalid) > 8:
+        details += f", plus {len(invalid) - 8} more"
+    return (
+        "Arena Hero API key must contain visible ASCII only; "
+        f"invalid characters: {details}."
+    )
+
+
+def _load_api_key() -> str:
+    configured = os.environ.get("ARENA_HERO_API_KEY")
+    if configured is not None:
+        api_key = configured.strip()
+        error = _api_key_validation_error(api_key)
+        if error:
+            raise SystemExit(error)
+        return api_key
+
+    while True:
+        api_key = getpass("Arena Hero API key: ").strip()
+        error = _api_key_validation_error(api_key)
+        if error is None:
+            return api_key
+        print(error)
+        print("Please copy the raw key without labels, quotes, or formatting.")
+
+
+def _load_local_environment() -> None:
+    # systemd supplies ARENA_HERO_API_KEY through EnvironmentFile. dotenv is
+    # only an optional convenience for local runs and must not prevent a
+    # server deployment from starting with an older compatible virtualenv.
+    if load_dotenv is not None:
+        load_dotenv(Path(__file__).resolve().with_name(".env"), override=False)
+
+
+def main() -> None:
+    _load_local_environment()
+    play(_load_api_key())
 
 
 if __name__ == "__main__":

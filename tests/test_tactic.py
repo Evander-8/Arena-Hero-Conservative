@@ -139,6 +139,14 @@ class FakeTurn:
         self.beacon = types.SimpleNamespace(status=None, position=(100, 100), carrier_id=None)
 
 
+def move_destination(unit):
+    action, direction = unit.actions[0]
+    if action != "move":
+        raise AssertionError(f"expected move action, got {action}")
+    dx, dy = direction.delta
+    return unit.position[0] + dx, unit.position[1] + dy
+
+
 class ResourceTacticTests(unittest.TestCase):
     def setUp(self):
         tactic.MEMORY = tactic.TacticMemory()
@@ -237,7 +245,7 @@ class ResourceTacticTests(unittest.TestCase):
     def test_ranger_shoots_aligned_visible_enemy(self):
         ranger = FakeUnit((0, 0), hp=2, identifier="r")
         enemy = FakeUnit(
-            (3, 3),
+            (3, 0),
             hp=1,
             identifier="e",
             unit_type=FakeUnitType.RANGER,
@@ -294,10 +302,10 @@ class ResourceTacticTests(unittest.TestCase):
 
     def test_normal_production_sequence_balances_economy_and_defense(self):
         cases = (
-            (4, 1, 0, FakeUnitType.WORKER, 10),
-            (6, 1, 0, FakeUnitType.RANGER, 17),
-            (6, 1, 1, FakeUnitType.WORKER, 10),
-            (8, 1, 1, FakeUnitType.RANGER, 17),
+            (4, 1, 0, FakeUnitType.VANGUARD, 10),
+            (6, 1, 0, FakeUnitType.VANGUARD, 17),
+            (6, 1, 1, FakeUnitType.VANGUARD, 10),
+            (8, 1, 1, FakeUnitType.VANGUARD, 17),
         )
         for worker_count, vanguard_count, ranger_count, expected, resources in cases:
             with self.subTest(
@@ -362,7 +370,7 @@ class ResourceTacticTests(unittest.TestCase):
         tactic.choose_actions(turn)
 
         self.assertEqual(vanguard.actions[0][0], "move")
-        self.assertEqual(core.actions, [("spawn", FakeUnitType.WORKER)])
+        self.assertEqual(core.actions, [("spawn", FakeUnitType.VANGUARD)])
 
     def test_core_damage_alert_repairs_shield_first(self):
         core = FakeCore((0, 0), shield=4)
@@ -398,7 +406,235 @@ class ResourceTacticTests(unittest.TestCase):
 
         tactic.choose_actions(turn)
 
-        self.assertEqual(core.actions, [("spawn", FakeUnitType.RANGER)])
+        self.assertEqual(core.actions, [("spawn", FakeUnitType.VANGUARD)])
+
+    def test_core_guard_pair_attacks_enemy_seen_near_core(self):
+        vanguard = FakeUnit(
+            (1, 0), hp=4, identifier="v-guard", unit_type=FakeUnitType.VANGUARD
+        )
+        ranger = FakeUnit(
+            (0, 1), hp=2, identifier="r-guard", unit_type=FakeUnitType.RANGER
+        )
+        enemy = FakeUnit(
+            (3, 0), hp=2, identifier="enemy-v", unit_type=FakeUnitType.VANGUARD,
+            controlled=False,
+        )
+        turn = FakeTurn(
+            vanguards=(vanguard,), rangers=(ranger,), enemies=(enemy,), core=FakeCore((0, 0))
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(vanguard.actions[0][0], "move")
+        self.assertEqual(ranger.actions[0][0], "move")
+
+    def test_two_combat_groups_split_multiple_enemies(self):
+        vanguards = (
+            FakeUnit((1, 0), hp=4, identifier="v-guard", unit_type=FakeUnitType.VANGUARD),
+            FakeUnit((4, 0), hp=4, identifier="v-expedition", unit_type=FakeUnitType.VANGUARD),
+        )
+        rangers = (
+            FakeUnit((0, 1), hp=2, identifier="r-guard", unit_type=FakeUnitType.RANGER),
+            FakeUnit((4, 1), hp=2, identifier="r-expedition", unit_type=FakeUnitType.RANGER),
+        )
+        enemies = (
+            FakeUnit((3, 0), hp=2, identifier="enemy-near", unit_type=FakeUnitType.VANGUARD, controlled=False),
+            FakeUnit((4, 3), hp=2, identifier="enemy-far", unit_type=FakeUnitType.RANGER, controlled=False),
+        )
+        turn = FakeTurn(vanguards=vanguards, rangers=rangers, enemies=enemies, core=FakeCore((0, 0)))
+
+        tactic.choose_actions(turn)
+
+        self.assertTrue(vanguards[0].actions)
+        self.assertTrue(rangers[0].actions)
+        self.assertTrue(vanguards[1].actions)
+        self.assertTrue(rangers[1].actions)
+
+    def test_production_completes_second_ranger_before_extra_workers(self):
+        workers = tuple(
+            FakeUnit((index + 2, 0), identifier=f"w{index}")
+            for index in range(6)
+        )
+        vanguards = (
+            FakeUnit((1, 0), hp=4, identifier="v1", unit_type=FakeUnitType.VANGUARD),
+            FakeUnit((1, 1), hp=4, identifier="v2", unit_type=FakeUnitType.VANGUARD),
+        )
+        ranger = FakeUnit((2, 1), hp=2, identifier="r1", unit_type=FakeUnitType.RANGER)
+        turn = FakeTurn(
+            workers=workers,
+            vanguards=vanguards,
+            rangers=(ranger,),
+            resources=20,
+            core=FakeCore((0, 0)),
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(turn.core.actions, [("spawn", FakeUnitType.RANGER)])
+
+    def test_expedition_low_hp_returns_to_core(self):
+        vanguards = (
+            FakeUnit((1, 0), hp=4, identifier="v-guard", unit_type=FakeUnitType.VANGUARD),
+            FakeUnit((5, 0), hp=1, identifier="v-expedition", unit_type=FakeUnitType.VANGUARD),
+        )
+        rangers = (
+            FakeUnit((0, 1), hp=2, identifier="r-guard", unit_type=FakeUnitType.RANGER),
+            FakeUnit((5, 1), hp=2, identifier="r-expedition", unit_type=FakeUnitType.RANGER),
+        )
+        turn = FakeTurn(vanguards=vanguards, rangers=rangers, core=FakeCore((0, 0)))
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(vanguards[1].actions[0][0], "move")
+        self.assertEqual(rangers[1].actions[0][0], "move")
+
+    def test_movement_reservations_prevent_same_destination(self):
+        first = FakeUnit((0, 0), identifier="first")
+        second = FakeUnit((1, 1), identifier="second")
+        reserved = set()
+
+        self.assertTrue(tactic._move_toward(first, (1, 0), set(), reserved))
+        self.assertTrue(tactic._move_toward(second, (1, 0), set(), reserved))
+
+        self.assertNotEqual(move_destination(first), move_destination(second))
+        self.assertEqual(reserved, {move_destination(first), move_destination(second)})
+
+    def test_only_one_injured_combat_unit_enters_core(self):
+        vanguard = FakeUnit(
+            (1, 0), hp=1, identifier="v", unit_type=FakeUnitType.VANGUARD
+        )
+        ranger = FakeUnit(
+            (0, 1), hp=1, identifier="r", unit_type=FakeUnitType.RANGER
+        )
+        turn = FakeTurn(
+            vanguards=(vanguard,),
+            rangers=(ranger,),
+            resources=10,
+            core=FakeCore((0, 0)),
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(move_destination(vanguard), (0, 0))
+        self.assertEqual(ranger.actions, [])
+
+    def test_injured_guard_returns_to_core_for_healing(self):
+        vanguard = FakeUnit(
+            (3, 0), hp=2, identifier="v", unit_type=FakeUnitType.VANGUARD
+        )
+        turn = FakeTurn(
+            vanguards=(vanguard,),
+            resources=10,
+            core=FakeCore((0, 0)),
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(vanguard.actions, [("move", FakeDirection.LEFT)])
+
+    def test_injured_combat_unit_at_core_queues_heal(self):
+        vanguard = FakeUnit(
+            (0, 0), hp=2, identifier="v", unit_type=FakeUnitType.VANGUARD
+        )
+        turn = FakeTurn(
+            vanguards=(vanguard,),
+            resources=10,
+            core=FakeCore((0, 0)),
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(vanguard.actions, [("heal",)])
+
+    def test_injured_unit_vacates_core_when_healing_has_no_resources(self):
+        vanguard = FakeUnit(
+            (0, 0), hp=2, identifier="v", unit_type=FakeUnitType.VANGUARD
+        )
+        turn = FakeTurn(
+            vanguards=(vanguard,),
+            resources=0,
+            core=FakeCore((0, 0)),
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(vanguard.actions[0][0], "move")
+        self.assertNotEqual(move_destination(vanguard), (0, 0))
+
+    def test_core_guard_can_route_through_friendly_exit_cells(self):
+        vanguard = FakeUnit(
+            (0, 0), hp=4, identifier="v", unit_type=FakeUnitType.VANGUARD
+        )
+        workers = (
+            FakeUnit((0, -1), cargo=0, identifier="w-up"),
+            FakeUnit((0, 1), cargo=0, identifier="w-down"),
+            FakeUnit((-1, 0), cargo=0, identifier="w-left"),
+            FakeUnit((1, 0), cargo=0, identifier="w-right"),
+        )
+        turn = FakeTurn(
+            workers=workers,
+            vanguards=(vanguard,),
+            core=FakeCore((0, 0)),
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(vanguard.actions[0][0], "move")
+
+    def test_core_guard_does_not_chase_enemy_seen_only_by_expedition(self):
+        vanguards = (
+            FakeUnit((1, 0), hp=4, identifier="v-guard", unit_type=FakeUnitType.VANGUARD),
+            FakeUnit((5, 0), hp=4, identifier="v-expedition", unit_type=FakeUnitType.VANGUARD),
+        )
+        rangers = (
+            FakeUnit((0, 1), hp=2, identifier="r-guard", unit_type=FakeUnitType.RANGER),
+            FakeUnit((5, 1), hp=2, identifier="r-expedition", unit_type=FakeUnitType.RANGER),
+        )
+        enemy = FakeUnit(
+            (9, 0), hp=2, identifier="enemy-far", unit_type=FakeUnitType.VANGUARD,
+            controlled=False,
+        )
+        turn = FakeTurn(
+            vanguards=vanguards,
+            rangers=rangers,
+            enemies=(enemy,),
+            obstacle_cells={(1, 0)},
+            core=FakeCore((0, 0)),
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertFalse(
+            vanguards[0].actions[0][0] == "sweep"
+            and vanguards[0].actions[0][1].name == "RIGHT"
+        )
+        self.assertNotIn(rangers[0].actions[0][0], {"shoot"})
+
+    def test_guard_patrol_goal_rotates_when_no_enemy_is_visible(self):
+        vanguard = FakeUnit(
+            (2, 0), hp=4, identifier="v-guard", unit_type=FakeUnitType.VANGUARD
+        )
+        ranger = FakeUnit(
+            (0, 2), hp=2, identifier="r-guard", unit_type=FakeUnitType.RANGER
+        )
+        turn = FakeTurn(vanguards=(vanguard,), rangers=(ranger,), core=FakeCore((0, 0)), tick=100)
+        tactic.choose_actions(turn)
+
+        self.assertTrue(vanguard.actions or ranger.actions)
+
+    def test_expedition_units_use_distinct_patrol_cells(self):
+        vanguards = (
+            FakeUnit((2, 0), hp=4, identifier="v1", unit_type=FakeUnitType.VANGUARD),
+            FakeUnit((2, 1), hp=4, identifier="v2", unit_type=FakeUnitType.VANGUARD),
+        )
+        rangers = (
+            FakeUnit((0, 2), hp=2, identifier="r1", unit_type=FakeUnitType.RANGER),
+            FakeUnit((1, 2), hp=2, identifier="r2", unit_type=FakeUnitType.RANGER),
+        )
+        turn = FakeTurn(vanguards=vanguards, rangers=rangers, core=FakeCore((0, 0)), tick=100)
+        tactic.choose_actions(turn)
+
+        self.assertTrue(all(unit.actions for unit in vanguards + rangers))
 
     def test_post_attack_recovery_buys_worker_when_defense_is_unaffordable(self):
         worker = FakeUnit((0, 0), identifier="w1")
@@ -548,6 +784,68 @@ class ResourceTacticTests(unittest.TestCase):
 
         self.assertEqual(memory.resource_targets, {"idle": (6, 0)})
         self.assertEqual(idle.actions, [("move", FakeDirection.RIGHT)])
+
+    def test_api_key_loader_strips_pasted_outer_whitespace(self):
+        with patch.dict(
+            tactic.os.environ,
+            {"ARENA_HERO_API_KEY": " \tvalid-key\r\n"},
+            clear=True,
+        ):
+            self.assertEqual(tactic._load_api_key(), "valid-key")
+
+    def test_api_key_loader_retries_non_ascii_without_echoing_key(self):
+        with (
+            patch.dict(tactic.os.environ, {}, clear=True),
+            patch.object(
+                tactic,
+                "getpass",
+                side_effect=["valid\u200bkey", "valid-key"],
+            ),
+            patch("builtins.print") as print_mock,
+        ):
+            self.assertEqual(tactic._load_api_key(), "valid-key")
+
+        output = "\n".join(str(call.args[0]) for call in print_mock.call_args_list)
+        self.assertIn("position 6=U+200B", output)
+        self.assertNotIn("valid\u200bkey", output)
+
+    def test_local_environment_loads_project_env_without_override(self):
+        with patch.object(tactic, "load_dotenv") as load_dotenv_mock:
+            tactic._load_local_environment()
+
+        load_dotenv_mock.assert_called_once_with(
+            ROOT / ".env",
+            override=False,
+        )
+
+    def test_dashboard_uses_only_the_configured_fixed_port(self):
+        runtime = object()
+        server = types.SimpleNamespace(server_port=9000)
+        with (
+            patch.dict(
+                tactic.os.environ,
+                {"ARENA_HERO_DASHBOARD_PORT": "9000"},
+                clear=True,
+            ),
+            patch.object(
+                tactic,
+                "start_dashboard",
+                return_value=(server, object()),
+            ) as start_dashboard_mock,
+            patch("builtins.print"),
+        ):
+            self.assertIs(tactic._start_configured_dashboard(runtime), server)
+
+        start_dashboard_mock.assert_called_once_with(runtime, port=9000)
+
+    def test_dashboard_port_conflict_stops_without_fallback(self):
+        runtime = object()
+        with (
+            patch.dict(tactic.os.environ, {}, clear=True),
+            patch.object(tactic, "start_dashboard", side_effect=OSError),
+            self.assertRaisesRegex(SystemExit, "port 8765 is unavailable"),
+        ):
+            tactic._start_configured_dashboard(runtime)
 
 
 if __name__ == "__main__":

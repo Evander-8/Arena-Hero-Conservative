@@ -538,7 +538,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def _send_json(self, payload: dict[str, Any]) -> None:
-        content = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        # SDK models may retain UUID values in event payloads. Convert those
+        # identifiers at the HTTP boundary so one malformed event cannot drop
+        # the entire /api/state response.
+        content = json.dumps(
+            payload,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
@@ -559,7 +566,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if next_sequence == sequence:
                     self.wfile.write(b": keepalive\n\n")
                 else:
-                    data = json.dumps(payload, separators=(",", ":"))
+                    data = json.dumps(payload, separators=(",", ":"), default=str)
                     message = f"id: {next_sequence}\ndata: {data}\n\n".encode("utf-8")
                     self.wfile.write(message)
                     sequence = next_sequence

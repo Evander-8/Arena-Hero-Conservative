@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
+from uuid import UUID
 from urllib.request import urlopen
 
 from dashboard import DashboardRuntime, OperatorStats, build_snapshot, start_dashboard
@@ -120,6 +121,21 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("<dialog", page)
         self.assertNotIn("statsButton", page)
         self.assertLess(page.index("operator-stats-section"), page.index("resources-section"))
+
+    def test_dashboard_serializes_uuid_values_in_state_and_runtime(self):
+        runtime = DashboardRuntime()
+        runtime.publish({"event": {"actorId": UUID("12345678-1234-5678-1234-567812345678")}})
+        server, thread = start_dashboard(runtime, port=0)
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urlopen(f"{base_url}/api/state", timeout=2) as response:
+                payload = json.load(response)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(payload["event"]["actorId"], "12345678-1234-5678-1234-567812345678")
 
     def test_operator_stats_accumulate_events_without_double_counting(self):
         stats = OperatorStats()
