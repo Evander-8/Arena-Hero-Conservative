@@ -181,235 +181,25 @@ sudo certbot --nginx -d arena.example.com
 
 Keep Basic Auth enabled even after adding TLS.
 
-## Update an existing deployment
+## 更新现有服务器
 
-Use this section when the project, virtual environment, runtime settings, and
-`arena-hero.service` already exist on the cloud server. Do not run the initial
-`useradd`, `git clone`, or `python3 -m venv` commands again.
-
-The commands below assume the existing layout shown above. If the previous
-deployment used another checkout path, replace `/opt/arena-hero-conservative`
-consistently in every command.
-
-### Offline update when the server cannot reach GitHub
-
-Create the release archive on the development machine. Run this from the
-repository root in PowerShell:
-
-```powershell
-$release = "arena-hero-release-$(Get-Date -Format yyyyMMdd-HHmmss).tar.gz"
-tar --exclude=.git --exclude=.venv --exclude=__pycache__ `
-    --exclude=.env --exclude='*.log' `
-    --exclude='.arena-hero-dashboard-*.json*' `
-    --exclude='arena-hero-release-*.tar.gz' `
-    -czf $release .
-```
-
-Upload the archive to the existing server with any available file-transfer
-method. `scp` is an example when SSH is reachable:
-
-```powershell
-scp $release "your-user@your-server:/tmp/"
-```
-
-The archive contains source, tests, requirements, and deployment templates. It
-does not contain `.git`, `.venv`, `.env`, API keys, logs, or persistent runtime
-state.
-
-On the server, select the newest uploaded archive, print the exact path, verify
-it, and only then stop the old service. Do not type the literal placeholder
-`YYYYMMDD-HHMMSS` and do not add a trailing `~` to the filename:
+服务器已经有项目、`.venv`、配置和依赖时，不需要重新部署环境。在服务器只执行这一
+条命令：
 
 ```bash
-release=$(ls -1t /tmp/arena-hero-release-*.tar.gz 2>/dev/null | head -n 1)
-test -n "$release" && test -f "$release"
-printf 'release=%s\n' "$release"
-tar -tzf "$release" | head -40
-sudo systemctl stop arena-hero.service
-sudo systemctl is-active arena-hero.service || true
+curl -fsSL \
+  https://raw.githubusercontent.com/Evander-8/Arena-Hero-Conservative/main/deploy/update-server.sh \
+  | sudo bash
 ```
 
-Back up the existing code and persistent state before replacing anything:
+脚本会直接从
+`https://github.com/Evander-8/Arena-Hero-Conservative.git` 获取最新代码，然后启动
+`arena-hero.service`。它不会删除已有 `.venv`、
+`/etc/arena-hero-conservative/arena-hero.env` 或
+`/var/lib/arena-hero-conservative`。如果更新失败，脚本会重新启动原服务。
 
-```bash
-sudo install -d -m 0750 -o root -g arena-hero /var/backups
-sudo tar -C /opt -czf \
-  /var/backups/arena-hero-code-$(date +%Y%m%d-%H%M%S).tgz \
-  arena-hero-conservative
-sudo tar -C /var/lib -czf \
-  /var/backups/arena-hero-state-$(date +%Y%m%d-%H%M%S).tgz \
-  arena-hero-conservative
-```
-
-Replace only the application source. This preserves the existing `.venv`, the
-systemd runtime settings, and `/var/lib/arena-hero-conservative`:
-
-```bash
-backup=/opt/arena-hero-conservative.previous-$(date +%Y%m%d-%H%M%S)
-sudo mv /opt/arena-hero-conservative \
-  "$backup"
-sudo install -d -m 0750 -o arena-hero -g arena-hero \
-  /opt/arena-hero-conservative
-sudo tar -xzf "$release" -C /opt/arena-hero-conservative
-sudo chown -R arena-hero:arena-hero /opt/arena-hero-conservative
-```
-
-Restore the existing virtual environment from the previous directory, then
-remove the temporary old checkout after verification:
-
-```bash
-sudo mv "$backup/.venv" \
-  /opt/arena-hero-conservative/.venv
-sudo chown -R arena-hero:arena-hero /opt/arena-hero-conservative/.venv
-```
-
-Install any changed dependencies and run offline checks. These commands do not
-need GitHub; they use the configured Python package index or an existing local
-package cache:
-
-```bash
-cd /opt/arena-hero-conservative
-sudo -u arena-hero .venv/bin/python -m pip install -r requirements.txt
-sudo -u arena-hero .venv/bin/python -m pip check
-sudo -u arena-hero .venv/bin/python -m unittest discover -s tests
-sudo -u arena-hero .venv/bin/python -m py_compile tactic.py dashboard.py
-```
-
-If dependency installation also cannot reach a package index, do not delete the
-old `.venv`; copy the already-installed `.venv` back and confirm that the new
-`requirements.txt` is compatible before starting.
-
-The service reads Dashboard and state settings from the systemd `EnvironmentFile`;
-it does not require `ARENA_HERO_API_KEY` at startup. If an older environment file
-still contains an `ARENA_HERO_API_KEY` line, it is ignored by this page-gated
-startup path and can be removed.
-
-Reinstall the service template only if it changed, then start the new version:
-
-```bash
-sudo install -m 0644 \
-  /opt/arena-hero-conservative/deploy/arena-hero.service \
-  /etc/systemd/system/arena-hero.service
-sudo systemctl daemon-reload
-sudo systemctl start arena-hero.service
-sudo systemctl status arena-hero.service --no-pager
-sudo journalctl -u arena-hero.service -n 80 --no-pager
-curl --fail --silent http://127.0.0.1:8765/api/state | python3 -m json.tool | head -80
-```
-
-The first state after every service restart should be `awaiting-key`. Reopen the
-Dashboard through the SSH tunnel or HTTPS reverse proxy and submit the Key
-again. Then repeat the state command and verify `runtime.status` is `connected`
-and `acceptedSubmissions` increases.
-
-Only after the new service is connected and submitting Ticks should you remove
-the previous checkout:
-
-```bash
-sudo rm -rf "$backup"
-```
-
-The old checkout is recoverable from the code backup until that cleanup command
-is run. Never remove `/var/lib/arena-hero-conservative`, because it contains the
-exploration map and operator statistics.
-
-The archive update is the preferred method when outbound GitHub access is
-blocked. It does not require changing the server firewall or proxy.
-
-An offline release archive intentionally excludes `.git`. After replacing an
-installation with this archive, continue using the offline archive procedure;
-the Git commands below apply only to deployments that still contain a valid
-`/opt/arena-hero-conservative/.git` checkout.
-
-### Online Git update when the server can reach GitHub
-
-#### 1. Check the current service and revision
-
-```bash
-cd /opt/arena-hero-conservative
-sudo systemctl status arena-hero.service --no-pager
-sudo -u arena-hero git rev-parse --short HEAD
-sudo -u arena-hero git status --short
-```
-
-The working tree should be clean before pulling. Do not overwrite local changes
-on the server without reviewing them first.
-
-#### 2. Stop the old tactic cleanly
-
-```bash
-sudo systemctl stop arena-hero.service
-sudo systemctl is-active arena-hero.service || true
-```
-
-Stopping the service prevents two tactic processes from sharing the same Agent
-slot during the update. It does not reset the Arena Hero world or delete the
-persistent map/statistics.
-
-#### 3. Back up persistent state and record the old revision
-
-```bash
-cd /opt/arena-hero-conservative
-sudo -u arena-hero git rev-parse --short HEAD
-sudo install -d -m 0750 -o root -g arena-hero /var/backups
-sudo tar -C /var/lib -czf \
-  /var/backups/arena-hero-state-$(date +%Y%m%d-%H%M%S).tgz \
-  arena-hero-conservative
-```
-
-#### 4. Pull the new version and synchronize dependencies
-
-```bash
-sudo -u arena-hero git pull --ff-only
-sudo -u arena-hero .venv/bin/python -m pip install -r requirements.txt
-sudo -u arena-hero .venv/bin/python -m pip check
-```
-
-The existing `.venv` is reused. `pip install -r` only changes packages required
-by the new version; it does not recreate the environment.
-
-#### 5. Test before starting
-
-```bash
-sudo -u arena-hero .venv/bin/python -m unittest discover -s tests
-sudo -u arena-hero .venv/bin/python -m py_compile tactic.py dashboard.py
-```
-
-#### 6. Start the updated service and verify it
-
-```bash
-sudo systemctl restart arena-hero.service
-sudo systemctl status arena-hero.service --no-pager
-sudo journalctl -u arena-hero.service -n 80 --no-pager
-curl --fail --silent http://127.0.0.1:8765/api/state | python3 -m json.tool | head -80
-```
-
-After `restart`, submit the API Key again through the Dashboard. Until then,
-`runtime.status=awaiting-key` is correct. After submission, check that status is
-`connected`, `acceptedSubmissions` increases, and there is only one process:
-
-```bash
-sudo systemctl is-active arena-hero.service
-pgrep -af 'tactic.py'
-```
-
-The service itself starts both the tactic and the local Dashboard. Do not run
-`python tactic.py` manually while the systemd service is active.
-
-### Roll back if verification fails
-
-If the new revision is bad, roll back code without deleting state:
-
-```bash
-sudo -u arena-hero git log --oneline -5
-sudo -u arena-hero git reset --hard <known-good-commit>
-sudo -u arena-hero .venv/bin/python -m pip install -r requirements.txt
-sudo systemctl restart arena-hero.service
-```
-
-After rollback, repeat the test and verification commands above. Only reset to
-an explicitly chosen known-good commit. Never reset
-`/var/lib/arena-hero-conservative`.
+服务重启后 Dashboard 显示 `awaiting-key` 是正常状态。重新在页面提交一次 Key 后，程序
+就会继续发送计划；关闭网页不会停止已经运行的程序。
 
 ## Common checks
 

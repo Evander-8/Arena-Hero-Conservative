@@ -196,22 +196,10 @@ Invoke-RestMethod http://127.0.0.1:8765/api/state
 文件、持久化状态目录、自动重启以及可选的 Nginx 密码保护配置。完整步骤见
 [`deploy/README.md`](deploy/README.md)。
 
-如果云服务器无法连接 GitHub，不需要在服务器执行 `git pull`：在本地按
-[`deploy/README.md`](deploy/README.md) 的“Offline update”流程打包源码并上传，服务器
-会在保留 `.venv`、运行配置和 `/var/lib/arena-hero-conservative` 状态的前提下覆盖
-应用代码。
-
-如果服务器可以连接 GitHub，标准同步流程是：
-
-```bash
-git status
-git add README.md deploy/README.md tactic.py tests
-git commit -m "Describe the update"
-git push origin main
-```
-
-服务器端再按 [`deploy/README.md`](deploy/README.md) 的“Update an existing
-deployment”流程执行测试和重启。不要提交 `.env`、运行日志、`.venv` 或离线压缩包。
+云服务器已有项目和依赖时，更新只需要执行一次更新脚本。脚本会从
+`https://github.com/Evander-8/Arena-Hero-Conservative.git` 获取最新代码并启动服务，
+同时保留 `.venv`、服务器配置和 `/var/lib/arena-hero-conservative` 中的运行状态。见
+[`deploy/README.md`](deploy/README.md) 的“更新现有服务器”。
 
 服务器部署建议保持 Dashboard 监听 `127.0.0.1`，通过 SSH 隧道或带 HTTPS/密码保护的
 Nginx 访问，不要直接将 `8765` 端口暴露到公网。可通过 `ARENA_HERO_STATE_DIR` 将地图
