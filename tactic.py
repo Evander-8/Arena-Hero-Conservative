@@ -50,11 +50,13 @@ WORKER_TARGET = 14
 FINAL_WORKER_TARGET = 14
 VANGUARD_TARGET = 2
 RANGER_TARGET = 2
-# Official Core storage is max(10, population * 5); 30 Units provide 150 slots.
-POPULATION_TARGET = 30
 CORE_ALERT_TICKS = 8
 CORE_GUARD_RADIUS = 2
 CORE_VISION_RADIUS = 5
+EXPEDITION_FAN_BASE_RADIUS = 26
+EXPEDITION_FAN_RADIUS_STEP = 8
+EXPEDITION_FAN_SPACING = 4
+EXPEDITION_RALLY_RADIUS = 3
 RESOURCE_MEMORY_RADIUS = 36
 RESOURCE_SCOUT_RADII = (12, 19, 26, 32, 26, 19)
 RESOURCE_SCOUT_WAYPOINT_STEP = 7
@@ -484,6 +486,8 @@ class TacticMemory:
     expedition_goal: dict[str, Position] = field(default_factory=dict)
     expedition_distance: dict[str, int] = field(default_factory=dict)
     expedition_stall: dict[str, int] = field(default_factory=dict)
+    expedition_wave: int = 0
+    expedition_formation: tuple[str, ...] = ()
     last_positions: dict[str, Position] = field(default_factory=dict)
     previous_positions: dict[str, Position] = field(default_factory=dict)
     core_alert_until: int = 0
@@ -567,6 +571,8 @@ class TacticMemory:
                 self.expedition_goal.clear()
                 self.expedition_distance.clear()
                 self.expedition_stall.clear()
+                self.expedition_wave = 0
+                self.expedition_formation = ()
             self.last_core_position = core_position
             self.known_resources = {
                 resource
@@ -757,36 +763,89 @@ class TacticMemory:
         self.scout_stall[worker_id] = 0
         return core
 
+    def assign_expedition_goals(
+        self,
+        units: Iterable[Any],
+        core: Position,
+    ) -> dict[str, Position]:
+        """Assign a gap-free fan front and rebalance it when membership changes."""
+
+        active = tuple(sorted(units, key=_object_key))
+        signature = tuple(_object_key(unit) for unit in active)
+        if not active:
+            self.expedition_goal.clear()
+            self.expedition_distance.clear()
+            self.expedition_stall.clear()
+            self.expedition_formation = ()
+            return {}
+
+        formation_changed = signature != self.expedition_formation
+        goals_complete = all(unit_id in self.expedition_goal for unit_id in signature)
+        wave_complete = goals_complete and all(
+            self.expedition_goal[unit_id] in self.visible_cells
+            or _manhattan(_position(unit), self.expedition_goal[unit_id]) <= 1
+            for unit, unit_id in zip(active, signature)
+        )
+        if formation_changed or not goals_complete or wave_complete:
+            if not formation_changed and (not goals_complete or wave_complete):
+                self.expedition_wave += 1
+            self.expedition_goal.clear()
+            self.expedition_distance.clear()
+            self.expedition_stall.clear()
+            self.expedition_formation = signature
+
+            directions = (
+                (1, 0),
+                (1, 1),
+                (0, 1),
+                (-1, 1),
+                (-1, 0),
+                (-1, -1),
+                (0, -1),
+                (1, -1),
+            )
+            direction = directions[self.expedition_wave % len(directions)]
+            perpendicular = (-direction[1], direction[0])
+            radius = EXPEDITION_FAN_BASE_RADIUS + (
+                self.expedition_wave // len(directions)
+            ) * EXPEDITION_FAN_RADIUS_STEP
+
+            for index, unit in enumerate(active):
+                unit_id = _object_key(unit)
+                lateral = (
+                    2 * index - (len(active) - 1)
+                ) * (EXPEDITION_FAN_SPACING // 2)
+                candidate = (
+                    core[0] + direction[0] * radius + perpendicular[0] * lateral,
+                    core[1] + direction[1] * radius + perpendicular[1] * lateral,
+                )
+                if candidate in self.known_obstacles:
+                    for shift in (1, -1, 2, -2, 3, -3):
+                        shifted = (
+                            candidate[0] + perpendicular[0] * shift,
+                            candidate[1] + perpendicular[1] * shift,
+                        )
+                        if shifted not in self.known_obstacles:
+                            candidate = shifted
+                            break
+                self.expedition_goal[unit_id] = candidate
+                self.expedition_distance[unit_id] = _manhattan(
+                    _position(unit), candidate
+                )
+                self.expedition_stall[unit_id] = 0
+
+        return {
+            unit_id: self.expedition_goal[unit_id]
+            for unit_id in signature
+            if unit_id in self.expedition_goal
+        }
+
     def expedition_goal_for(self, unit: Any, core: Position) -> Position:
-        """Keep expedition units on a stable outer-ring route."""
+        """Compatibility wrapper for callers assigning one expedition unit."""
 
-        unit_id = _object_key(unit)
-        current = _position(unit)
-        goal = self.expedition_goal.get(unit_id)
-        if (
-            goal is not None
-            and goal not in self.known_obstacles
-            and _manhattan(current, goal) > 1
-        ):
-            return goal
-
-        radii = tuple(sorted(set(RESOURCE_SCOUT_RADII))[-2:])
-        seed = sum(ord(char) for char in unit_id)
-        ring_index = (seed + len(self.expedition_goal)) % len(radii)
-        route = _square_ring_waypoints(core, radii[ring_index])
-        if route:
-            offset = seed % len(route)
-            for candidate in route[offset:] + route[:offset]:
-                if candidate not in self.known_obstacles:
-                    self.expedition_goal[unit_id] = candidate
-                    self.expedition_distance[unit_id] = _manhattan(current, candidate)
-                    self.expedition_stall[unit_id] = 0
-                    return candidate
-
-        self.expedition_goal[unit_id] = core
-        self.expedition_distance[unit_id] = _manhattan(current, core)
-        self.expedition_stall[unit_id] = 0
-        return core
+        return self.assign_expedition_goals((unit,), core).get(
+            _object_key(unit), core
+        )
 
 
 MEMORY = TacticMemory()
@@ -933,6 +992,26 @@ def _combat_units(turn: Any) -> tuple[Any, ...]:
     return tuple(sorted((*turn.vanguards, *turn.rangers), key=_object_key))
 
 
+def _guard_count(unit_count: int) -> int:
+    """Keep one third of each combat type at the Core, rounded up."""
+
+    return 0 if unit_count <= 0 else max(1, (unit_count + 2) // 3)
+
+
+def _split_guard_force(units: Iterable[Any]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    ordered = tuple(
+        sorted(
+            units,
+            key=lambda unit: (
+                1 if _unit_injured(unit) else 0,
+                _object_key(unit),
+            ),
+        )
+    )
+    guard_count = _guard_count(len(ordered))
+    return ordered[:guard_count], ordered[guard_count:]
+
+
 def _core_visible_enemies(turn: Any, obstacles: set[Position]) -> list[Any]:
     """Return hostile units inside the Core's five-cell vision envelope."""
 
@@ -995,11 +1074,128 @@ def _group_visible_enemies(
     return sorted(
         seen.values(),
         key=lambda enemy: (
+            0 if _is_enemy_core(enemy) else 1,
             min(_manhattan(_position(unit), _position(enemy)) for unit in units),
             int(getattr(enemy, "hp", 0)),
             _object_key(enemy),
         ),
     )
+
+
+def _expedition_rally_ready(units: tuple[Any, ...], target: Any | None) -> bool:
+    if target is None or len(units) <= 1:
+        return True
+    target_position = _position(target)
+    return all(
+        _manhattan(_position(unit), target_position) <= EXPEDITION_RALLY_RADIUS
+        for unit in units
+    )
+
+
+def _expedition_rally_goal(
+    unit: Any,
+    target: Any,
+    unit_index: int,
+    blocked: set[Position],
+    claimed: set[Position],
+) -> Position:
+    current = _position(unit)
+    target_position = _position(target)
+    if (
+        _manhattan(current, target_position) <= EXPEDITION_RALLY_RADIUS
+        and current not in claimed
+    ):
+        claimed.add(current)
+        return current
+
+    candidates = (
+        _guard_candidates(target_position, 2)
+        + _guard_candidates(target_position, EXPEDITION_RALLY_RADIUS)
+    )
+    offset = unit_index % len(candidates)
+    ordered = candidates[offset:] + candidates[:offset]
+    for candidate in ordered:
+        if candidate in blocked or candidate in claimed:
+            continue
+        claimed.add(candidate)
+        return candidate
+    return current
+
+
+def _unit_can_attack_now(
+    unit: Any,
+    target: Any,
+    terrain_obstacles: set[Position],
+) -> bool:
+    unit_type = _unit_type_value(unit)
+    source = _position(unit)
+    destination = _position(target)
+    if unit_type == "VANGUARD":
+        return _manhattan(source, destination) == 1
+    if unit_type == "RANGER":
+        return _aligned_shot(source, destination, terrain_obstacles)
+    return False
+
+
+def _expedition_defensive_target(
+    turn: Any,
+    unit: Any,
+    terrain_obstacles: set[Position],
+) -> Any | None:
+    """Find a visible hostile this unit can hit before it reaches rally range."""
+
+    candidates = [
+        enemy
+        for enemy in turn.visible_enemies
+        if _unit_can_attack_now(unit, enemy, terrain_obstacles)
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda enemy: (
+            0 if _is_enemy_core(enemy) else 1,
+            int(getattr(enemy, "hp", 0)),
+            _object_key(enemy),
+        ),
+    )
+
+
+def _queue_expedition_rally(
+    turn: Any,
+    unit: Any,
+    goal: Position,
+    terrain_obstacles: set[Position],
+    movement_obstacles: set[Position],
+    reserved: set[Position] | None = None,
+) -> bool:
+    if _queue_beacon_pickup(turn, unit):
+        return False
+    defensive_target = _expedition_defensive_target(
+        turn,
+        unit,
+        terrain_obstacles,
+    )
+    if defensive_target is not None:
+        unit_type = _unit_type_value(unit)
+        if unit_type == "VANGUARD":
+            direction = _direction_between(_position(unit), _position(defensive_target))
+            if direction is not None:
+                unit.sweep(direction)
+                return False
+        elif unit_type == "RANGER":
+            if _is_enemy_core(defensive_target):
+                unit.shoot(defensive_target)
+            else:
+                shoot_cell = getattr(unit, "shoot_cell", None)
+                if callable(shoot_cell):
+                    shoot_cell(_position(defensive_target))
+                else:
+                    unit.shoot(defensive_target)
+            return False
+    if _position(unit) == goal:
+        return False
+    return _move_toward(unit, goal, movement_obstacles, reserved)
 
 
 def _unit_max_hp(unit: Any) -> int:
@@ -1093,6 +1289,9 @@ def _queue_combat_action(
             enemy_position,
             terrain_obstacles,
         ):
+            if _is_enemy_core(target):
+                unit.shoot(target)
+                return False
             # Target-free cell fire retargets whichever hostile occupies the
             # cell after movement. Precision fire carries target_id and must
             # miss when that enemy moves before combat resolves.
@@ -1302,12 +1501,10 @@ def _spawn_choice(turn: Any, core_alert: bool) -> Any:
     if UnitType is None:
         return None
     population = int(getattr(turn.state, "population", len(turn.units)))
-    if population >= POPULATION_TARGET:
-        return None
 
-    # Keep one Vanguard and one Ranger at the Core, then grow a mixed
-    # expedition fleet. During an alert, restore the missing defensive type
-    # before adding economy units.
+    # Establish the initial mixed force, then keep growing without a local
+    # population ceiling. Dynamic server pricing and available resources remain
+    # the authoritative production constraints.
     workers = len(turn.workers)
     if workers < BOOTSTRAP_WORKER_TARGET:
         return UnitType.WORKER
@@ -1318,7 +1515,6 @@ def _spawn_choice(turn: Any, core_alert: bool) -> Any:
     if core_alert and missing_ranger:
         return UnitType.RANGER
 
-    combat = len(turn.vanguards) + len(turn.rangers)
     # Catch the economy up before adding another combat unit. This prevents a
     # large combat burst from starving the Worker fleet and Core income.
     desired_workers = min(
@@ -1392,10 +1588,7 @@ def _queue_core_action(
         return
     cost = unit_cost(choice, turn.state.population) if unit_cost is not None else 0
     reserve = _production_reserve(turn, choice, core_alert)
-    if (
-        turn.resources >= cost + reserve
-        and turn.state.population < POPULATION_TARGET
-    ):
+    if turn.resources >= cost + reserve:
         core.spawn(choice)
 
 
@@ -1427,12 +1620,8 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
     reserved_destinations: set[Position] = set()
     departing_core_ids: set[str] = set()
 
-    sorted_vanguards = tuple(sorted(turn.vanguards, key=_object_key))
-    sorted_rangers = tuple(sorted(turn.rangers, key=_object_key))
-    guard_vanguards = sorted_vanguards[:1]
-    expedition_vanguards = sorted_vanguards[1:]
-    guard_rangers = sorted_rangers[:1]
-    expedition_rangers = sorted_rangers[1:]
+    guard_vanguards, expedition_vanguards = _split_guard_force(turn.vanguards)
+    guard_rangers, expedition_rangers = _split_guard_force(turn.rangers)
     guard_units = guard_vanguards + guard_rangers
     expedition_units = expedition_vanguards + expedition_rangers
     combat_units = guard_units + expedition_units
@@ -1520,6 +1709,13 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
     active_expedition = tuple(
         unit for unit in expedition_units if _object_key(unit) not in injured_ids
     )
+    expedition_goals = memory.assign_expedition_goals(
+        active_expedition,
+        core_position,
+    )
+    expedition_indexes = {
+        _object_key(unit): index for index, unit in enumerate(active_expedition)
+    }
     guard_enemies = _core_visible_enemies(turn, terrain_obstacles)
     if not guard_enemies:
         guard_enemies = _group_visible_enemies(turn, active_guards, terrain_obstacles)
@@ -1530,7 +1726,25 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
         include_cores=True,
     )
     guard_targets = _assign_targets(active_guards, guard_enemies)
-    expedition_targets = _assign_targets(active_expedition, expedition_enemies)
+    primary_expedition_target = (
+        expedition_enemies[0] if expedition_enemies else None
+    )
+    rally_ready = _expedition_rally_ready(
+        active_expedition,
+        primary_expedition_target,
+    )
+    enemy_core = next(
+        (enemy for enemy in expedition_enemies if _is_enemy_core(enemy)),
+        None,
+    )
+    expedition_targets = (
+        {
+            _object_key(unit): enemy_core
+            for unit in active_expedition
+        }
+        if enemy_core is not None
+        else _assign_targets(active_expedition, expedition_enemies)
+    )
     expedition_retreat = bool(active_expedition) and (
         len(expedition_enemies) > len(active_expedition) and core_alert
     )
@@ -1610,6 +1824,7 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
             departing_core_ids.add(unit_id)
 
     expedition_claimed: set[Position] = set(claimed_guard_cells)
+    rally_claimed: set[Position] = set()
     for unit in expedition_vanguards:
         unit_id = _object_key(unit)
         if unit_id == recovery_id:
@@ -1635,8 +1850,16 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
                 patrol_phase,
                 occupancy,
             )
+        elif primary_expedition_target is not None and not rally_ready:
+            expedition_goal = _expedition_rally_goal(
+                unit,
+                primary_expedition_target,
+                expedition_indexes.get(unit_id, 0),
+                traffic_obstacles | reserved_destinations,
+                rally_claimed,
+            )
         else:
-            expedition_goal = memory.expedition_goal_for(unit, core_position)
+            expedition_goal = expedition_goals.get(unit_id, core_position)
             beacon = getattr(turn, "beacon", None)
             beacon_status = _enum_value(getattr(beacon, "status", None))
             if (
@@ -1647,17 +1870,27 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
                 and getattr(beacon, "position", None) is not None
             ):
                 expedition_goal = tuple(beacon.position)
-        moved = _queue_vanguard_action(
-            turn,
-            unit,
-            terrain_obstacles,
-            traffic_obstacles,
-            expedition_goal,
-            None if retreat else expedition_targets.get(unit_id),
-            retreat,
-            patrol_phase,
-            reserved_destinations,
-        )
+        if primary_expedition_target is not None and not rally_ready and not retreat:
+            moved = _queue_expedition_rally(
+                turn,
+                unit,
+                expedition_goal,
+                terrain_obstacles,
+                traffic_obstacles,
+                reserved_destinations,
+            )
+        else:
+            moved = _queue_vanguard_action(
+                turn,
+                unit,
+                terrain_obstacles,
+                traffic_obstacles,
+                expedition_goal,
+                None if retreat else expedition_targets.get(unit_id),
+                retreat,
+                patrol_phase,
+                reserved_destinations,
+            )
         if moved and _position(unit) == core_position:
             departing_core_ids.add(unit_id)
 
@@ -1684,8 +1917,16 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
                 expedition_claimed,
                 patrol_phase,
             )
+        elif primary_expedition_target is not None and not rally_ready:
+            expedition_goal = _expedition_rally_goal(
+                unit,
+                primary_expedition_target,
+                expedition_indexes.get(unit_id, 0),
+                traffic_obstacles | reserved_destinations,
+                rally_claimed,
+            )
         else:
-            expedition_goal = memory.expedition_goal_for(unit, core_position)
+            expedition_goal = expedition_goals.get(unit_id, core_position)
             beacon = getattr(turn, "beacon", None)
             beacon_status = _enum_value(getattr(beacon, "status", None))
             if (
@@ -1696,17 +1937,27 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
                 and getattr(beacon, "position", None) is not None
             ):
                 expedition_goal = tuple(beacon.position)
-        moved = _queue_ranger_action(
-            turn,
-            unit,
-            terrain_obstacles,
-            traffic_obstacles,
-            expedition_goal,
-            None if retreat else expedition_targets.get(unit_id),
-            retreat,
-            patrol_phase,
-            reserved_destinations,
-        )
+        if primary_expedition_target is not None and not rally_ready and not retreat:
+            moved = _queue_expedition_rally(
+                turn,
+                unit,
+                expedition_goal,
+                terrain_obstacles,
+                traffic_obstacles,
+                reserved_destinations,
+            )
+        else:
+            moved = _queue_ranger_action(
+                turn,
+                unit,
+                terrain_obstacles,
+                traffic_obstacles,
+                expedition_goal,
+                None if retreat else expedition_targets.get(unit_id),
+                retreat,
+                patrol_phase,
+                reserved_destinations,
+            )
         if moved and _position(unit) == core_position:
             departing_core_ids.add(unit_id)
 

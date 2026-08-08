@@ -140,29 +140,35 @@ scp $release "root@服务器IP:/tmp/"
 ### 2. 服务器覆盖代码并启动
 
 ```bash
+set -e
+
 release=$(ls -1t /tmp/arena-hero-release-*.tar.gz | head -n 1)
 test -n "$release" && test -f "$release"
 test -x /opt/arena-hero-conservative/.venv/bin/python
+tar -tzf "$release" >/dev/null
 
 systemctl stop arena-hero.service
 tar -xzf "$release" -C /opt/arena-hero-conservative
-rm -f /opt/arena-hero-conservative/deploy/update-server.sh
 chown -R arena-hero:arena-hero /opt/arena-hero-conservative
 
 cd /opt/arena-hero-conservative
 sudo -u arena-hero .venv/bin/python -m py_compile tactic.py dashboard.py
+sudo -u arena-hero .venv/bin/python -m unittest discover -s tests
+sudo -u arena-hero .venv/bin/python -m pip check
 
 install -m 0644 deploy/arena-hero.service \
   /etc/systemd/system/arena-hero.service
 systemctl daemon-reload
 systemctl reset-failed arena-hero.service
-systemctl start arena-hero.service
+systemctl restart arena-hero.service
 systemctl status arena-hero.service --no-pager
 ```
 
 更新只覆盖项目代码，不删除已有 `.venv`、
 `/etc/arena-hero-conservative/arena-hero.env` 或
-`/var/lib/arena-hero-conservative`。服务重新启动后，需要在 Dashboard 再提交一次 Key。
+`/var/lib/arena-hero-conservative`。`set -e` 会在压缩包校验、语法检查、测试或依赖检查
+失败时立即停止，不会用已知有问题的代码启动服务。服务重新启动后，需要在 Dashboard
+再提交一次 Key。
 
 ## 使用域名访问 Dashboard
 
