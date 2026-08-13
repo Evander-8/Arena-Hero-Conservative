@@ -44,12 +44,6 @@ MAX_VANGUARD_HP = 4
 MAX_RANGER_HP = 2
 COMBAT_THREAT_RADIUS = 5
 WORKER_THREAT_RADIUS = 2
-RESOURCE_RESERVE = 5
-BOOTSTRAP_WORKER_TARGET = 4
-WORKER_TARGET = 14
-FINAL_WORKER_TARGET = 14
-VANGUARD_TARGET = 2
-RANGER_TARGET = 2
 CORE_ALERT_TICKS = 8
 CORE_GUARD_RADIUS = 2
 CORE_VISION_RADIUS = 5
@@ -61,6 +55,73 @@ RESOURCE_MEMORY_RADIUS = 36
 RESOURCE_SCOUT_RADII = (12, 19, 26, 32, 26, 19)
 RESOURCE_SCOUT_WAYPOINT_STEP = 7
 PATHFINDING_EXPANSIONS = 1500
+
+# === 均衡流派:四阶段配置 ===
+# 阶段阈值(Tick)
+PHASE_OPENING_END = 20       # 开局期:经济 bootstrap + 早期侦察
+PHASE_DEVELOPMENT_END = 60   # 发展期:经济巩固 + 基础防御 + 首次远征
+PHASE_MIDGAME_END = 120      # 中期:主动远征 + Beacon 争夺
+# Tick 120+ 为后期:全面进攻 + Beacon 控制
+
+# 各阶段 Worker 目标
+WORKERS_OPENING = 6
+WORKERS_DEVELOPMENT = 10
+WORKERS_MIDGAME = 12
+WORKERS_LATEGAME = 14
+
+# 各阶段 Vanguard 目标
+VANGUARDS_OPENING = 2
+VANGUARDS_DEVELOPMENT = 4
+VANGUARDS_MIDGAME = 6
+VANGUARDS_LATEGAME = 8
+
+# 各阶段 Ranger 目标
+RANGERS_OPENING = 1
+RANGERS_DEVELOPMENT = 3
+RANGERS_MIDGAME = 5
+RANGERS_LATEGAME = 7
+
+# 各阶段资源预留
+RESOURCE_RESERVE_OPENING = 3
+RESOURCE_RESERVE_NORMAL = 5
+RESOURCE_RESERVE_LATEGAME = 8
+RESOURCE_RESERVE_ALERT = 2
+
+# 开局 bootstrap Worker 数(优先快速补到)
+BOOTSTRAP_WORKER_TARGET = 4
+
+# Beacon 策略参数
+BEACON_PICKUP_MAX_DISTANCE = 18  # 超过此距离不考虑拾取
+BEACON_ESCORT_RADIUS = 3         # 护送半径
+BEACON_CONTEST_MIN_UNITS = 3     # 抢夺 Beacon 最少单位数
+
+# 威胁等级
+THREAT_NONE = 0       # 无威胁
+THREAT_EXPEDITION = 1  # 远征队遇敌
+THREAT_CORE_VISION = 2  # Core 视野内有敌
+THREAT_CORE_UNDER_ATTACK = 3  # Core 受击
+
+# 各威胁等级下守军比例分母(1/N)
+GUARD_RATIO_DENOMINATORS = {
+    THREAT_NONE: 4,
+    THREAT_EXPEDITION: 3,
+    THREAT_CORE_VISION: 2,
+    THREAT_CORE_UNDER_ATTACK: 1,  # 全员守 Core
+}
+
+# Ranger 风筝距离
+RANGER_KITE_DISTANCE_MIN = 2
+RANGER_KITE_DISTANCE_MAX = 3
+
+# 早期专责侦察兵索引(第 N 个 Worker 作为侦察兵)
+SCOUT_WORKER_INDEX = 3
+
+# 向后兼容:测试和 Dashboard 可能引用的旧常量名
+RESOURCE_RESERVE = RESOURCE_RESERVE_NORMAL
+WORKER_TARGET = WORKERS_LATEGAME
+FINAL_WORKER_TARGET = WORKERS_LATEGAME
+VANGUARD_TARGET = VANGUARDS_OPENING
+RANGER_TARGET = RANGERS_OPENING
 
 Position = tuple[int, int]
 
@@ -228,6 +289,8 @@ def _move_toward(
     reserved: set[Position] | None = None,
 ) -> bool:
     source = _position(unit)
+    if source == target:
+        return False  # 已在目标位置,不移动(消除原地震荡)
     active_obstacles = obstacles | (reserved or set())
     destination = _first_path_step(source, target, active_obstacles)
     direction = (
@@ -239,6 +302,24 @@ def _move_toward(
         direction = _direction_for_step(source, target, active_obstacles)
     if direction is None:
         return False
+    # 路径稳定性:优先走与上一步相同的方向,避免每 Tick 切换轴向
+    # (A* 在无障碍时可能返回 y 方向第一步,导致单位先绕远路)
+    dx = target[0] - source[0]
+    dy = target[1] - source[1]
+    if dx and dy:
+        # 两轴都有距离时,优先走距离更大的轴
+        preferred_axis_x = abs(dx) >= abs(dy)
+        current_delta = _delta(direction)
+        current_is_x = current_delta[0] != 0
+        if preferred_axis_x != current_is_x:
+            # 当前方向不是优先轴,尝试切换到优先轴
+            preferred_step = (1 if dx > 0 else -1, 0) if preferred_axis_x else (0, 1 if dy > 0 else -1)
+            preferred_dest = (source[0] + preferred_step[0], source[1] + preferred_step[1])
+            if preferred_dest not in active_obstacles and (reserved is None or preferred_dest not in reserved):
+                for d in _directions():
+                    if _delta(d) == preferred_step:
+                        direction = d
+                        break
     return _queue_move(unit, direction, reserved)
 
 
@@ -248,15 +329,15 @@ def _explore(
     obstacles: set[tuple[int, int]],
     reserved: set[Position] | None = None,
 ) -> bool:
-    """Take a deterministic low-commitment step when no resource is visible."""
+    """无资源可见时,朝稳定方向探索(不随 Tick 轮换,消除震荡)。"""
 
     directions = _directions()
     if not directions:
         return False
     seed = sum(ord(char) for char in str(getattr(unit, "id", "")))
-    phase = int(getattr(turn, "tick", 0)) // 4
+    # 稳定性:移除 phase 轮换,每个 Worker 有固定的方向偏好
     for offset in range(len(directions)):
-        direction = directions[(seed + phase + offset) % len(directions)]
+        direction = directions[(seed + offset) % len(directions)]
         dx, dy = _delta(direction)
         destination = (_position(unit)[0] + dx, _position(unit)[1] + dy)
         if destination not in obstacles and (
@@ -474,6 +555,7 @@ def _nonnegative_int_map(value: Any) -> dict[str, int]:
 class TacticMemory:
     known_obstacles: set[Position] = field(default_factory=set)
     known_resources: set[Position] = field(default_factory=set)
+    resource_last_seen: dict[Position, int] = field(default_factory=dict)
     explored_cells: set[Position] = field(default_factory=set)
     visible_cells: set[Position] = field(default_factory=set)
     resource_targets: dict[str, Position] = field(default_factory=dict)
@@ -492,6 +574,12 @@ class TacticMemory:
     previous_positions: dict[str, Position] = field(default_factory=dict)
     core_alert_until: int = 0
     last_core_position: Position | None = None
+    # === 均衡流派新增字段 ===
+    enemy_core_position: Position | None = None  # 记忆敌方 Core 位置
+    enemy_core_last_seen_tick: int = 0           # 上次看到敌方 Core 的 Tick
+    beacon_carrier_id: str | None = None         # 己方 Beacon 携带者 ID
+    beacon_state: str = "DORMANT"                # DORMANT/SECURE/ESCORT/CONTESTED
+    last_threat_level: int = THREAT_NONE         # 上一 Tick 威胁等级
 
     @classmethod
     def load(cls, path: Path) -> "TacticMemory":
@@ -532,6 +620,13 @@ class TacticMemory:
         visible_resources = {tuple(position) for position in turn.resource_cells}
         live_worker_ids = {_object_key(worker) for worker in turn.workers}
         live_unit_ids = {_object_key(unit) for unit in turn.units}
+        tick = int(getattr(turn, "tick", 0))
+
+        # 追踪敌方 Core 位置
+        for enemy in getattr(turn, "visible_enemies", ()):
+            if _is_enemy_core(enemy):
+                self.enemy_core_position = _position(enemy)
+                self.enemy_core_last_seen_tick = tick
 
         for unit in turn.units:
             unit_id = _object_key(unit)
@@ -607,12 +702,21 @@ class TacticMemory:
 
         self.known_resources.update(visible_resources)
         sources = _friendly_vision_sources(turn)
+        # 资源宽限期:刚发现的资源至少保留 N Tick,避免视野边缘抖动导致误删
+        for resource in visible_resources:
+            self.resource_last_seen[resource] = tick
         for resource in tuple(self.known_resources - visible_resources):
+            # 宽限期:最近实际看到过的资源保留 3 Tick,避免视野边缘抖动误删
+            # 未记录 last_seen(如从持久化加载)默认为很早,可立即删除
+            last_seen = self.resource_last_seen.get(resource, -1000)
+            if tick - last_seen < 3:
+                continue  # 宽限期内,保留
             if any(
                 _visible_from(source, resource, radius, self.known_obstacles)
                 for source, radius in sources
             ):
                 self.known_resources.discard(resource)
+                self.resource_last_seen.pop(resource, None)
 
         for worker_id, target in tuple(self.resource_targets.items()):
             if worker_id not in live_worker_ids or target not in self.known_resources:
@@ -671,6 +775,7 @@ class TacticMemory:
         workers = tuple(sorted(workers, key=_object_key))
         assigned_resources: set[Position] = set()
         assignments: dict[str, Position] = {}
+        claimed_workers: set[str] = set()
 
         # A Worker already standing on a resource gets first claim, preventing
         # another Worker from contesting the same cell by UUID resolution.
@@ -684,10 +789,27 @@ class TacticMemory:
             ):
                 assignments[worker_id] = position
                 assigned_resources.add(position)
+                claimed_workers.add(worker_id)
 
-        # Rebuild the matching every Turn. A newly discovered nearby resource
-        # can therefore replace an older, farther target instead of waiting for
-        # that sticky assignment to complete.
+        # 粘性分配:Worker 即将到达目标(距离<=2)时保持,防止最后几步震荡
+        for worker in workers:
+            worker_id = _object_key(worker)
+            if worker_id in claimed_workers:
+                continue
+            if int(getattr(worker, "cargo", 0) or 0) != 0:
+                continue
+            current_target = self.resource_targets.get(worker_id)
+            if (
+                current_target is not None
+                and current_target in self.known_resources
+                and current_target not in assigned_resources
+                and _manhattan(_position(worker), current_target) <= 2
+            ):
+                assignments[worker_id] = current_target
+                assigned_resources.add(current_target)
+                claimed_workers.add(worker_id)
+
+        # 对没有粘性目标的 Worker,按距离贪心匹配剩余资源
         idle_workers = [
             worker
             for worker in workers
@@ -703,7 +825,6 @@ class TacticMemory:
             ),
             key=lambda item: (item[0], item[1], item[2]),
         )
-        claimed_workers: set[str] = set()
         for _, worker_id, resource in candidates:
             if worker_id in claimed_workers or resource in assigned_resources:
                 continue
@@ -851,6 +972,144 @@ class TacticMemory:
 MEMORY = TacticMemory()
 
 
+# === 阶段管理 ===
+
+def _current_phase(tick: int) -> str:
+    """返回当前游戏阶段:OPENING/DEVELOPMENT/MIDGAME/LATEGAME"""
+    if tick < PHASE_OPENING_END:
+        return "OPENING"
+    if tick < PHASE_DEVELOPMENT_END:
+        return "DEVELOPMENT"
+    if tick < PHASE_MIDGAME_END:
+        return "MIDGAME"
+    return "LATEGAME"
+
+
+def _worker_target_for_phase(phase: str) -> int:
+    return {
+        "OPENING": WORKERS_OPENING,
+        "DEVELOPMENT": WORKERS_DEVELOPMENT,
+        "MIDGAME": WORKERS_MIDGAME,
+        "LATEGAME": WORKERS_LATEGAME,
+    }[phase]
+
+
+def _vanguard_target_for_phase(phase: str) -> int:
+    return {
+        "OPENING": VANGUARDS_OPENING,
+        "DEVELOPMENT": VANGUARDS_DEVELOPMENT,
+        "MIDGAME": VANGUARDS_MIDGAME,
+        "LATEGAME": VANGUARDS_LATEGAME,
+    }[phase]
+
+
+def _ranger_target_for_phase(phase: str) -> int:
+    return {
+        "OPENING": RANGERS_OPENING,
+        "DEVELOPMENT": RANGERS_DEVELOPMENT,
+        "MIDGAME": RANGERS_MIDGAME,
+        "LATEGAME": RANGERS_LATEGAME,
+    }[phase]
+
+
+def _resource_reserve_for_phase(phase: str, core_alert: bool) -> int:
+    if core_alert:
+        return RESOURCE_RESERVE_ALERT
+    if phase == "OPENING":
+        return RESOURCE_RESERVE_OPENING
+    if phase == "LATEGAME":
+        return RESOURCE_RESERVE_LATEGAME
+    return RESOURCE_RESERVE_NORMAL
+
+
+# === 威胁评估 ===
+
+def _assess_threat_level(
+    turn: Any,
+    memory: TacticMemory,
+    terrain_obstacles: set[Position],
+) -> int:
+    """评估当前威胁等级:0=无, 1=远征遇敌, 2=Core视野有敌, 3=Core受击"""
+    tick = int(getattr(turn, "tick", 0))
+    if memory.core_alerted(tick):
+        return THREAT_CORE_UNDER_ATTACK
+    core_threats = _core_threats(turn, terrain_obstacles, immediate_only=False)
+    if core_threats:
+        return THREAT_CORE_VISION
+    if turn.visible_enemies:
+        return THREAT_EXPEDITION
+    return THREAT_NONE
+
+
+# === Beacon 状态机 ===
+
+def _beacon_pickup_eligible(
+    turn: Any,
+    phase: str,
+    threat_level: int,
+) -> bool:
+    """根据阶段和威胁等级判断是否可以拾取 Beacon"""
+    beacon = getattr(turn, "beacon", None)
+    if beacon is None:
+        return False
+    if _enum_value(getattr(beacon, "status", None)) != "GROUND":
+        return False
+    core = turn.core
+    if core is None:
+        return False
+    beacon_pos = tuple(beacon.position)
+    core_pos = _position(core)
+    distance = _manhattan(beacon_pos, core_pos)
+    if distance > BEACON_PICKUP_MAX_DISTANCE:
+        return False
+
+    if phase == "OPENING":
+        # 开局期:仅在非常近且完全安全时拾取
+        return (
+            distance <= 5
+            and not turn.visible_enemies
+            and core.hp == MAX_CORE_HP
+            and core.shield >= 5
+            and turn.resources >= 10
+        )
+
+    if phase == "DEVELOPMENT":
+        # 发展期:近距离且安全时拾取
+        return (
+            distance <= 12
+            and not turn.visible_enemies
+            and core.hp == MAX_CORE_HP
+            and core.shield >= 4
+            and turn.resources >= 8
+        )
+
+    # 中后期:更积极
+    if threat_level >= THREAT_CORE_VISION:
+        return False  # Core 受威胁时不拾取
+    if threat_level == THREAT_EXPEDITION:
+        # 远征遇敌时,仅在有足够兵力时拾取
+        if len(turn.vanguards) + len(turn.rangers) < 4:
+            return False
+    return core.hp >= MAX_CORE_HP - 1 and core.shield >= 3
+
+
+def _beacon_carrier_unit(turn: Any) -> Any | None:
+    """返回己方携带 Beacon 的单位(如果有)"""
+    beacon = getattr(turn, "beacon", None)
+    if beacon is None:
+        return None
+    if _enum_value(getattr(beacon, "status", None)) != "CARRIED":
+        return None
+    carrier_id = getattr(beacon, "carrier_id", None)
+    if carrier_id is None:
+        return None
+    carrier_id_str = str(carrier_id)
+    for unit in turn.units:
+        if _object_key(unit) == carrier_id_str:
+            return unit
+    return None
+
+
 def _same_cell(first: Any, second: Any) -> bool:
     return _position(first) == _position(second)
 
@@ -898,21 +1157,30 @@ def _aligned_shot(
 
 
 def _beacon_ready(turn: Any) -> bool:
+    """向后兼容的 Beacon 就绪检查;实际拾取判断由 _beacon_pickup_eligible 处理。"""
     core = turn.core
     return (
         core is not None
-        and len(turn.workers) >= WORKER_TARGET
-        and len(turn.vanguards) >= VANGUARD_TARGET
-        and len(turn.rangers) >= RANGER_TARGET
+        and len(turn.workers) >= BOOTSTRAP_WORKER_TARGET
         and core.hp == MAX_CORE_HP
-        and core.shield >= 5
-        and turn.resources >= RESOURCE_RESERVE * 2
+        and core.shield >= 3
         and not turn.visible_enemies
     )
 
 
+# 全局上下文,由 choose_actions 设置,供 _queue_beacon_pickup 使用
+_BEACON_CONTEXT: dict[str, Any] = {"phase": "OPENING", "threat": THREAT_NONE}
+
+
 def _queue_beacon_pickup(turn: Any, obj: Any) -> bool:
-    if _beacon_ready(turn) and _beacon_is_ground_at(turn, _position(obj)):
+    if (
+        _beacon_is_ground_at(turn, _position(obj))
+        and _beacon_pickup_eligible(
+            turn,
+            _BEACON_CONTEXT.get("phase", "OPENING"),
+            _BEACON_CONTEXT.get("threat", THREAT_NONE),
+        )
+    ):
         obj.pickup_beacon()
         return True
     return False
@@ -941,13 +1209,20 @@ def _guard_goal(
     phase: int = 0,
 ) -> Position:
     candidates = _guard_candidates(core, radius)
-    seed = sum(ord(char) for char in _object_key(unit)) + phase
+    current = _position(unit)
+    # 关键:排除自己的位置,否则单位永远无法留在原地(因为自己在 friendly_positions 中)
+    effective_blocked = blocked - {current}
+    # 稳定性:单位已在某个候选位置且可用时,保持不动
+    if current in candidates and current not in effective_blocked and current not in claimed:
+        claimed.add(current)
+        return current
+    seed = sum(ord(char) for char in _object_key(unit))
     ordered = candidates[seed % len(candidates) :] + candidates[: seed % len(candidates)]
     for candidate in ordered:
-        if candidate not in blocked and candidate not in claimed:
+        if candidate not in effective_blocked and candidate not in claimed:
             claimed.add(candidate)
             return candidate
-    return _position(unit)
+    return current
 
 
 def _patrol_step(
@@ -958,33 +1233,24 @@ def _patrol_step(
     phase: int = 0,
     reserved: set[Position] | None = None,
 ) -> bool:
-    """Keep a combat unit moving around a local ring when no enemy is visible."""
+    """无敌人时,单位在候选位置则保持不动,否则移向最近候选位置。"""
 
     origin = _position(unit)
     candidates = _guard_candidates(core, radius)
     if not candidates:
         return False
-    seed = sum(ord(char) for char in _object_key(unit)) + phase
-    ordered = candidates[seed % len(candidates) :] + candidates[: seed % len(candidates)]
+    # 稳定性:单位已在候选位置时保持不动
     if origin in candidates:
-        index = candidates.index(origin)
-        ordered = candidates[index + 1 :] + candidates[: index + 1]
+        return False
+    # 移向最近的可用候选位置(稳定排序,不随 Tick 变化)
+    effective_obstacles = obstacles - {origin}
+    seed = sum(ord(char) for char in _object_key(unit))
+    ordered = candidates[seed % len(candidates) :] + candidates[: seed % len(candidates)]
     for candidate in ordered:
-        if candidate == origin or candidate in obstacles:
+        if candidate == origin or candidate in effective_obstacles:
             continue
-        if _move_toward(unit, candidate, obstacles, reserved):
+        if _move_toward(unit, candidate, effective_obstacles, reserved):
             return True
-    # A blocked ring should still produce a legal in-range step when possible.
-    for direction in _directions():
-        dx, dy = _delta(direction)
-        destination = (origin[0] + dx, origin[1] + dy)
-        if (
-            destination in obstacles
-            or (reserved is not None and destination in reserved)
-            or _manhattan(destination, core) > radius + 1
-        ):
-            continue
-        return _queue_move(unit, direction, reserved)
     return False
 
 
@@ -992,13 +1258,28 @@ def _combat_units(turn: Any) -> tuple[Any, ...]:
     return tuple(sorted((*turn.vanguards, *turn.rangers), key=_object_key))
 
 
-def _guard_count(unit_count: int) -> int:
-    """Keep one third of each combat type at the Core, rounded up."""
+def _guard_count(unit_count: int, threat_level: int = THREAT_EXPEDITION) -> int:
+    """根据威胁等级动态计算守军数量。
 
-    return 0 if unit_count <= 0 else max(1, (unit_count + 2) // 3)
+    L0: 1/4 守军   L1: 1/3 守军   L2: 1/2 守军   L3: 全员守 Core
+    使用向下取整,确保小规模时也有远征队(至少留 1 个单位远征)。
+    """
+    if unit_count <= 0:
+        return 0
+    if threat_level >= THREAT_CORE_UNDER_ATTACK:
+        return unit_count  # 全员守 Core
+    denominator = GUARD_RATIO_DENOMINATORS.get(threat_level, 3)
+    guard = unit_count // denominator
+    # 至少 1 个守军,但最多留 1 个单位远征(当单位数>=2时)
+    if guard == 0 and unit_count >= 2:
+        guard = 1
+    return guard
 
 
-def _split_guard_force(units: Iterable[Any]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+def _split_guard_force(
+    units: Iterable[Any],
+    threat_level: int = THREAT_EXPEDITION,
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     ordered = tuple(
         sorted(
             units,
@@ -1008,7 +1289,7 @@ def _split_guard_force(units: Iterable[Any]) -> tuple[tuple[Any, ...], tuple[Any
             ),
         )
     )
-    guard_count = _guard_count(len(ordered))
+    guard_count = _guard_count(len(ordered), threat_level)
     return ordered[:guard_count], ordered[guard_count:]
 
 
@@ -1246,10 +1527,12 @@ def _recovery_staging_goal(
         return origin
 
     candidates = _guard_candidates(core, 1) + _guard_candidates(core, 2)
-    seed = sum(ord(char) for char in _object_key(unit)) + phase
+    # 排除自己的位置,允许移动到当前位置附近(消除震荡)
+    effective_blocked = blocked - {origin}
+    seed = sum(ord(char) for char in _object_key(unit))
     ordered = candidates[seed % len(candidates) :] + candidates[: seed % len(candidates)]
     for candidate in ordered:
-        if candidate not in blocked and candidate not in claimed:
+        if candidate not in effective_blocked and candidate not in claimed:
             claimed.add(candidate)
             return candidate
     return origin
@@ -1497,67 +1780,79 @@ def _queue_ranger_action(
     )
 
 
-def _spawn_choice(turn: Any, core_alert: bool) -> Any:
+def _spawn_choice(turn: Any, core_alert: bool, phase: str = "OPENING") -> Any:
+    """阶段化生产决策:根据当前阶段和局势选择生产单位类型。"""
     if UnitType is None:
         return None
     population = int(getattr(turn.state, "population", len(turn.units)))
-
-    # Establish the initial mixed force, then keep growing without a local
-    # population ceiling. Dynamic server pricing and available resources remain
-    # the authoritative production constraints.
     workers = len(turn.workers)
+    vanguards = len(turn.vanguards)
+    rangers = len(turn.rangers)
+
+    # 1. Bootstrap 阶段:优先快速补 Worker
     if workers < BOOTSTRAP_WORKER_TARGET:
         return UnitType.WORKER
-    missing_vanguard = max(0, VANGUARD_TARGET - len(turn.vanguards))
-    missing_ranger = max(0, RANGER_TARGET - len(turn.rangers))
+
+    # 阶段目标
+    worker_target = _worker_target_for_phase(phase)
+    vanguard_target = _vanguard_target_for_phase(phase)
+    ranger_target = _ranger_target_for_phase(phase)
+
+    # 2. Core 警戒时优先补战斗单位
+    missing_vanguard = max(0, vanguard_target - vanguards)
+    missing_ranger = max(0, ranger_target - rangers)
     if core_alert and missing_vanguard:
         return UnitType.VANGUARD
     if core_alert and missing_ranger:
         return UnitType.RANGER
 
-    # Catch the economy up before adding another combat unit. This prevents a
-    # large combat burst from starving the Worker fleet and Core income.
-    desired_workers = min(
-        WORKER_TARGET,
-        max(BOOTSTRAP_WORKER_TARGET, population // 2),
-    )
+    # 3. 经济追赶:Worker 少于人口一半时补 Worker(不超过阶段上限)
+    desired_workers = min(worker_target, max(BOOTSTRAP_WORKER_TARGET, population // 2))
     if not core_alert and workers < desired_workers:
         return UnitType.WORKER
 
+    # 4. 补齐阶段战斗单位目标
     if missing_vanguard:
         return UnitType.VANGUARD
     if missing_ranger:
         return UnitType.RANGER
 
-    # Build enough workers to sustain the economy, then alternate combat types
-    # so each new pair can form a Vanguard/Ranger expedition team.
-    if len(turn.rangers) <= len(turn.vanguards):
+    # 5. 超过阶段目标后:交替生产战斗单位,保持 Vanguard/Ranger 比例
+    # Ranger 不少于 Vanguard,确保远征队有足够远程火力
+    if rangers <= vanguards:
         return UnitType.RANGER
-    if workers < FINAL_WORKER_TARGET:
+    # Worker 未达最终上限时继续补
+    if workers < WORKERS_LATEGAME:
         return UnitType.WORKER
     return UnitType.VANGUARD
 
 
-def _production_reserve(turn: Any, choice: Any, core_alert: bool) -> int:
+def _production_reserve(
+    turn: Any,
+    choice: Any,
+    core_alert: bool,
+    phase: str = "OPENING",
+) -> int:
+    # Bootstrap 阶段不保留资源,加速开局
+    if choice == getattr(UnitType, "WORKER", None) and len(turn.workers) < BOOTSTRAP_WORKER_TARGET:
+        return 0
+    # 基础战斗单位不足时不保留
     if choice in {
         getattr(UnitType, "VANGUARD", None),
         getattr(UnitType, "RANGER", None),
     } and (
-        len(turn.vanguards) < VANGUARD_TARGET
-        or len(turn.rangers) < RANGER_TARGET
+        len(turn.vanguards) < VANGUARDS_OPENING
+        or len(turn.rangers) < RANGERS_OPENING
     ):
         return 0
-    if choice == getattr(UnitType, "WORKER", None) and len(turn.workers) < BOOTSTRAP_WORKER_TARGET:
-        return 0
-    if core_alert:
-        return 2
-    return RESOURCE_RESERVE
+    return _resource_reserve_for_phase(phase, core_alert)
 
 
 def _queue_core_action(
     turn: Any,
     departing_core_ids: set[str],
     core_alert: bool,
+    phase: str = "OPENING",
 ) -> None:
     core = turn.core
     if core is None or not _core_is_stationary(core):
@@ -1566,10 +1861,12 @@ def _queue_core_action(
         return
 
     core_position = _position(core)
+    # 1. Core 回血优先级最高
     if core.hp < MAX_CORE_HP:
         core.heal()
         return
 
+    # 2. 护盾修复:携带 Beacon 时上限 10,否则 5
     beacon_carrier = _beacon_is_carried_by(turn, core) or any(
         _beacon_is_carried_by(turn, unit) for unit in turn.units
     )
@@ -1578,36 +1875,48 @@ def _queue_core_action(
         core.repair_shield()
         return
 
+    # 3. 生产单位
     occupants_after_movement = sum(
         1
         for unit in turn.units
         if _position(unit) == core_position and _object_key(unit) not in departing_core_ids
     )
-    choice = _spawn_choice(turn, core_alert)
+    choice = _spawn_choice(turn, core_alert, phase)
     if choice is None or occupants_after_movement:
         return
     cost = unit_cost(choice, turn.state.population) if unit_cost is not None else 0
-    reserve = _production_reserve(turn, choice, core_alert)
+    reserve = _production_reserve(turn, choice, core_alert, phase)
     if turn.resources >= cost + reserve:
         core.spawn(choice)
 
 
 def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
-    """Queue one complete, current-Turn plan using a resource-first policy."""
+    """均衡流派主决策:四阶段 + 威胁分级 + Beacon 状态机。"""
 
     memory = memory or MEMORY
     memory.observe(turn)
     if turn.core is None:
         return
+
+    tick = int(getattr(turn, "tick", 0))
+    # === 阶段 + 威胁评估 ===
+    phase = _current_phase(tick)
     terrain_obstacles = set(memory.known_obstacles)
     if _core_threats(turn, terrain_obstacles, immediate_only=False):
         memory.core_alert_until = max(
             memory.core_alert_until,
-            int(getattr(turn, "tick", 0)) + CORE_ALERT_TICKS,
+            tick + CORE_ALERT_TICKS,
         )
-    core_alert = memory.core_alerted(int(getattr(turn, "tick", 0)))
+    core_alert = memory.core_alerted(tick)
+    threat_level = _assess_threat_level(turn, memory, terrain_obstacles)
+    memory.last_threat_level = threat_level
+
+    # 设置 Beacon 上下文(供 _queue_beacon_pickup 使用)
+    _BEACON_CONTEXT["phase"] = phase
+    _BEACON_CONTEXT["threat"] = threat_level
+
     core_position = _position(turn.core)
-    patrol_phase = int(getattr(turn, "tick", 0)) // 2
+    patrol_phase = tick // 2
     traffic_obstacles = (
         terrain_obstacles
         | {_position(enemy) for enemy in turn.visible_enemies}
@@ -1620,8 +1929,13 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
     reserved_destinations: set[Position] = set()
     departing_core_ids: set[str] = set()
 
-    guard_vanguards, expedition_vanguards = _split_guard_force(turn.vanguards)
-    guard_rangers, expedition_rangers = _split_guard_force(turn.rangers)
+    # === 动态守军/远征队划分(基于威胁等级)===
+    guard_vanguards, expedition_vanguards = _split_guard_force(
+        turn.vanguards, threat_level
+    )
+    guard_rangers, expedition_rangers = _split_guard_force(
+        turn.rangers, threat_level
+    )
     guard_units = guard_vanguards + guard_rangers
     expedition_units = expedition_vanguards + expedition_rangers
     combat_units = guard_units + expedition_units
@@ -1634,6 +1948,11 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
         else None
     )
     recovery_id = _object_key(recovery_unit) if recovery_unit is not None else None
+
+    # === Beacon 携带者护送 ===
+    beacon_carrier = _beacon_carrier_unit(turn)
+    beacon_carrier_id = _object_key(beacon_carrier) if beacon_carrier is not None else None
+    memory.beacon_carrier_id = beacon_carrier_id
 
     guard_blocked = (
         traffic_obstacles
@@ -1686,9 +2005,9 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
     assignments = memory.assign_resources(turn.workers)
     workers = tuple(sorted(turn.workers, key=_object_key))
     for worker_index, worker in enumerate(workers):
-        worker_obstacles = traffic_obstacles | (
-            friendly_positions - {_position(worker)}
-        )
+        # Worker 不把友军位置当障碍(避免友军移动后路径震荡)
+        # 仅用 reserved 机制避免同一 Tick 撞到同一格
+        worker_obstacles = traffic_obstacles
         moved = _queue_worker_action(
             turn,
             worker,
@@ -1709,10 +2028,23 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
     active_expedition = tuple(
         unit for unit in expedition_units if _object_key(unit) not in injured_ids
     )
-    expedition_goals = memory.assign_expedition_goals(
-        active_expedition,
-        core_position,
-    )
+    # Beacon 携带者护送:如果己方携带 Beacon,远征队优先护送回 Core
+    if beacon_carrier is not None:
+        memory.beacon_state = "ESCORT"
+        expedition_goals = {
+            _object_key(unit): _position(beacon_carrier)
+            for unit in active_expedition
+        }
+    else:
+        memory.beacon_state = (
+            "SECURE"
+            if _beacon_pickup_eligible(turn, phase, threat_level)
+            else "DORMANT"
+        )
+        expedition_goals = memory.assign_expedition_goals(
+            active_expedition,
+            core_position,
+        )
     expedition_indexes = {
         _object_key(unit): index for index, unit in enumerate(active_expedition)
     }
@@ -1850,6 +2182,15 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
                 patrol_phase,
                 occupancy,
             )
+        elif beacon_carrier is not None:
+            # 护送 Beacon 携带者
+            expedition_goal = _expedition_rally_goal(
+                unit,
+                beacon_carrier,
+                expedition_indexes.get(unit_id, 0),
+                traffic_obstacles | reserved_destinations,
+                rally_claimed,
+            )
         elif primary_expedition_target is not None and not rally_ready:
             expedition_goal = _expedition_rally_goal(
                 unit,
@@ -1865,12 +2206,17 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
             if (
                 expedition_rangers
                 and unit is expedition_rangers[0]
-                and _beacon_ready(turn)
+                and _beacon_pickup_eligible(turn, phase, threat_level)
                 and beacon_status == "GROUND"
                 and getattr(beacon, "position", None) is not None
             ):
                 expedition_goal = tuple(beacon.position)
-        if primary_expedition_target is not None and not rally_ready and not retreat:
+        if (
+            primary_expedition_target is not None
+            and not rally_ready
+            and not retreat
+            and beacon_carrier is None
+        ):
             moved = _queue_expedition_rally(
                 turn,
                 unit,
@@ -1917,6 +2263,15 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
                 expedition_claimed,
                 patrol_phase,
             )
+        elif beacon_carrier is not None:
+            # 护送 Beacon 携带者
+            expedition_goal = _expedition_rally_goal(
+                unit,
+                beacon_carrier,
+                expedition_indexes.get(unit_id, 0),
+                traffic_obstacles | reserved_destinations,
+                rally_claimed,
+            )
         elif primary_expedition_target is not None and not rally_ready:
             expedition_goal = _expedition_rally_goal(
                 unit,
@@ -1932,12 +2287,17 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
             if (
                 expedition_rangers
                 and unit is expedition_rangers[0]
-                and _beacon_ready(turn)
+                and _beacon_pickup_eligible(turn, phase, threat_level)
                 and beacon_status == "GROUND"
                 and getattr(beacon, "position", None) is not None
             ):
                 expedition_goal = tuple(beacon.position)
-        if primary_expedition_target is not None and not rally_ready and not retreat:
+        if (
+            primary_expedition_target is not None
+            and not rally_ready
+            and not retreat
+            and beacon_carrier is None
+        ):
             moved = _queue_expedition_rally(
                 turn,
                 unit,
@@ -1961,10 +2321,12 @@ def choose_actions(turn: Any, memory: TacticMemory | None = None) -> None:
         if moved and _position(unit) == core_position:
             departing_core_ids.add(unit_id)
 
+    # === Core 动作(生产/回血/护盾/Beacon)===
     _queue_core_action(
         turn,
         departing_core_ids,
         core_alert,
+        phase,
     )
 
 
